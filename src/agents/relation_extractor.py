@@ -1,6 +1,7 @@
 """Relation extraction module using LangChain and LLMs."""
 
 import os
+import re
 from typing import List, Dict, Any
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
@@ -27,6 +28,40 @@ class RelationExtractor:
             api_key=os.getenv("GROQ_API_KEY")
         )
         self.parser = JsonOutputParser(pydantic_object=Relation)
+    
+    def _extract_json_from_markdown(self, text: str) -> str:
+        """Extract JSON from markdown code blocks if present."""
+        # Remove markdown code block markers
+        text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
+        text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
+        text = text.strip()
+        
+        # Try to find the first JSON array or object (handles nested structures)
+        # Look for array first (most common for entities/relations)
+        bracket_count = 0
+        start_idx = text.find('[')
+        if start_idx != -1:
+            for i in range(start_idx, len(text)):
+                if text[i] == '[':
+                    bracket_count += 1
+                elif text[i] == ']':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        return text[start_idx:i+1]
+        
+        # If no array, try object
+        brace_count = 0
+        start_idx = text.find('{')
+        if start_idx != -1:
+            for i in range(start_idx, len(text)):
+                if text[i] == '{':
+                    brace_count += 1
+                elif text[i] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        return text[start_idx:i+1]
+        
+        return text
         
     def extract_relations(
         self, 
@@ -86,13 +121,30 @@ Return a JSON array of relations with all their properties."""),
             ("human", "Extract all relations between the given entities from the following text. Include all available properties for each relation (dates, roles, amounts, etc.):\n\n{text}\n\nReturn only valid JSON array of relations with all their properties.")
         ])
         
-        chain = prompt | self.llm | JsonOutputParser()
+        chain = prompt | self.llm
         
         try:
-            result = chain.invoke({
+            # Get raw response to handle markdown wrapping
+            raw_response = chain.invoke({
                 "text": text,
                 "entities_info": "\n".join(entities_info)
             })
+            
+            # Extract content from AIMessage if needed
+            response_text = raw_response.content if hasattr(raw_response, 'content') else str(raw_response)
+            
+            # Try to parse with JsonOutputParser first
+            try:
+                result = JsonOutputParser().parse(response_text)
+            except Exception as e1:
+                # If parsing fails, try to extract JSON from markdown
+                try:
+                    json_text = self._extract_json_from_markdown(response_text)
+                    result = json.loads(json_text)
+                except Exception as e2:
+                    print(f"Error parsing JSON: {e2}")
+                    print(f"Response text (first 500 chars): {response_text[:500]}")
+                    raise
             
             # Handle both list and dict responses
             if isinstance(result, dict) and "relations" in result:

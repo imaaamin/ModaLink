@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.so
 *.pdf
+!tests/fixtures/*.pdf
 *.png
 .Python
 env/

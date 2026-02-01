@@ -1,6 +1,7 @@
 """Neo4j exporter for document graphs."""
 
 import os
+import json
 from typing import Optional, Dict, Any
 from src.models.document_graph import DocumentGraph
 from src.models.entity import Entity
@@ -147,10 +148,26 @@ class Neo4jExporter:
                         core_fields = {"id", "name", "type", "description"}
                         
                         # Extract additional properties (everything except core fields)
-                        additional_props = {
-                            k: v for k, v in all_props.items()
-                            if k not in core_fields and v is not None
-                        }
+                        # Neo4j can handle lists of primitives, but not nested maps or arrays of maps
+                        additional_props = {}
+                        for k, v in all_props.items():
+                            if k not in core_fields and v is not None:
+                                # Handle different types
+                                if isinstance(v, (str, int, float, bool)):
+                                    additional_props[k] = v
+                                elif isinstance(v, list):
+                                    # Check if list contains only primitives
+                                    if all(isinstance(item, (str, int, float, bool)) for item in v):
+                                        additional_props[k] = v
+                                    else:
+                                        # List contains complex types - convert to JSON string
+                                        additional_props[k] = json.dumps(v)
+                                elif isinstance(v, dict):
+                                    # Dict with nested structure - convert to JSON string
+                                    additional_props[k] = json.dumps(v)
+                                else:
+                                    # Convert other types to string
+                                    additional_props[k] = str(v)
                         
                         # Sanitize label name to be a valid Neo4j identifier
                         label = self._sanitize_label(entity.type)
@@ -232,21 +249,39 @@ class Neo4jExporter:
                         core_fields = {"id", "source_entity_id", "target_entity_id", "relation_type", "description", "confidence"}
                         
                         # Extract additional properties (everything except core fields)
-                        additional_props = {
-                            k: v for k, v in all_props.items()
-                            if k not in core_fields and v is not None
-                        }
+                        # Neo4j can handle lists of primitives, but not nested maps or arrays of maps
+                        additional_props = {}
+                        for k, v in all_props.items():
+                            if k not in core_fields and v is not None:
+                                # Handle different types
+                                if isinstance(v, (str, int, float, bool)):
+                                    additional_props[k] = v
+                                elif isinstance(v, list):
+                                    # Check if list contains only primitives
+                                    if all(isinstance(item, (str, int, float, bool)) for item in v):
+                                        additional_props[k] = v
+                                    else:
+                                        # List contains complex types - convert to JSON string
+                                        additional_props[k] = json.dumps(v)
+                                elif isinstance(v, dict):
+                                    # Dict with nested structure - convert to JSON string
+                                    additional_props[k] = json.dumps(v)
+                                else:
+                                    # Convert other types to string
+                                    additional_props[k] = str(v)
                         
                         # Get relation type - sanitize it for Neo4j
                         rel_type = self._sanitize_label(relation.relation_type)
                         
                         # Build SET clauses for additional properties
                         set_clauses = [
+                            "r.id = $rel_id",
                             "r.description = $description",
                             "r.confidence = $confidence",
                             "r.created = timestamp()"
                         ]
                         match_clauses = [
+                            "r.id = $rel_id",
                             "r.description = $description",
                             "r.confidence = $confidence",
                             "r.updated = timestamp()"
@@ -273,6 +308,7 @@ class Neo4jExporter:
                         params = {
                             "source_id": relation.source_entity_id,
                             "target_id": relation.target_entity_id,
+                            "rel_id": relation.id,
                             "description": relation.description or "",
                             "confidence": relation.confidence
                         }

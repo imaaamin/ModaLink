@@ -316,6 +316,43 @@ The codebase is organized into logical modules:
   - `export_to_neo4j.py`: Standalone script to export JSON graphs to Neo4j
   - `fetch_pr_comments.py`: Utility to fetch GitHub PR comments
 
+## Testing
+
+Integration tests are available in the `tests/` directory. These tests verify:
+
+- Entity and relation extraction from documents
+- JSON export functionality
+- Neo4j export and data consistency
+- Property export for entities and relations
+
+### Running Tests Locally
+
+```bash
+# Install test dependencies
+uv sync
+
+# Run all tests
+uv run pytest tests/
+
+# Run with coverage
+uv run pytest tests/ --cov=src --cov-report=html
+```
+
+### CI/CD
+
+Tests run automatically on GitHub Actions for every push and pull request. The CI workflow:
+- Sets up a Neo4j instance using Docker (Neo4j 5 Community Edition)
+- Runs all integration tests
+- Verifies entity and relation extraction
+- Validates Neo4j export functionality
+
+**GitHub Actions Setup:**
+1. Add `GROQ_API_KEY` as a repository secret in GitHub Settings → Secrets and variables → Actions
+2. The workflow automatically sets up Neo4j in a Docker container
+3. Tests run against the containerized Neo4j instance
+
+See `tests/README.md` for more details on test setup and requirements.
+
 ## License
 
 MIT

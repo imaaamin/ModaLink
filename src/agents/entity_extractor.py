@@ -1,6 +1,7 @@
 """Entity extraction module using LangChain and LLMs."""
 
 import os
+import re
 from typing import List, Dict, Any
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
@@ -26,6 +27,40 @@ class EntityExtractor:
             api_key=os.getenv("GROQ_API_KEY")
         )
         self.parser = JsonOutputParser(pydantic_object=Entity)
+    
+    def _extract_json_from_markdown(self, text: str) -> str:
+        """Extract JSON from markdown code blocks if present."""
+        # Remove markdown code block markers
+        text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
+        text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
+        text = text.strip()
+        
+        # Try to find the first JSON array or object (handles nested structures)
+        # Look for array first (most common for entities/relations)
+        bracket_count = 0
+        start_idx = text.find('[')
+        if start_idx != -1:
+            for i in range(start_idx, len(text)):
+                if text[i] == '[':
+                    bracket_count += 1
+                elif text[i] == ']':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        return text[start_idx:i+1]
+        
+        # If no array, try object
+        brace_count = 0
+        start_idx = text.find('{')
+        if start_idx != -1:
+            for i in range(start_idx, len(text)):
+                if text[i] == '{':
+                    brace_count += 1
+                elif text[i] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        return text[start_idx:i+1]
+        
+        return text
         
     def extract_entities(self, text: str) -> List[Entity]:
         """
@@ -61,11 +96,27 @@ Return a JSON array of entities. Each entity should be unique - do not duplicate
             ("human", "Extract all entities from the following text. Include all available properties for each entity:\n\n{text}\n\nReturn only valid JSON array of entities with all their properties.")
         ])
         
-        extract_chain = extract_prompt | self.llm | JsonOutputParser()
+        extract_chain = extract_prompt | self.llm
         
         try:
-            # Extract entities first
-            extract_result = extract_chain.invoke({"text": text})
+            # Extract entities first - get raw response to handle markdown wrapping
+            raw_response = extract_chain.invoke({"text": text})
+            
+            # Extract content from AIMessage if needed
+            response_text = raw_response.content if hasattr(raw_response, 'content') else str(raw_response)
+            
+            # Try to parse with JsonOutputParser first
+            try:
+                extract_result = JsonOutputParser().parse(response_text)
+            except Exception as e1:
+                # If parsing fails, try to extract JSON from markdown
+                try:
+                    json_text = self._extract_json_from_markdown(response_text)
+                    extract_result = json.loads(json_text)
+                except Exception as e2:
+                    print(f"Error parsing JSON: {e2}")
+                    print(f"Response text (first 500 chars): {response_text[:500]}")
+                    raise
             
             # Handle both list and dict responses
             if isinstance(extract_result, dict) and "entities" in extract_result:
@@ -100,12 +151,29 @@ Return a JSON array with the same entities but with type assigned to each, prese
                 ("human", "Categorize these entities into types. Preserve all properties from the original extraction:\n\n{entities_json}\n\nReturn only valid JSON array of entities with types assigned, keeping all original properties.")
             ])
             
-            categorize_chain = categorize_prompt | self.llm | JsonOutputParser()
+            categorize_chain = categorize_prompt | self.llm
             
             # Convert entities to JSON string for categorization
             entities_json = json.dumps(entities_data, indent=2)
             
-            categorize_result = categorize_chain.invoke({"entities_json": entities_json})
+            # Get raw response to handle markdown wrapping
+            raw_response = categorize_chain.invoke({"entities_json": entities_json})
+            
+            # Extract content from AIMessage if needed
+            response_text = raw_response.content if hasattr(raw_response, 'content') else str(raw_response)
+            
+            # Try to parse with JsonOutputParser first
+            try:
+                categorize_result = JsonOutputParser().parse(response_text)
+            except Exception as e1:
+                # If parsing fails, try to extract JSON from markdown
+                try:
+                    json_text = self._extract_json_from_markdown(response_text)
+                    categorize_result = json.loads(json_text)
+                except Exception as e2:
+                    print(f"Error parsing JSON: {e2}")
+                    print(f"Response text (first 500 chars): {response_text[:500]}")
+                    raise
             
             # Handle categorization result
             if isinstance(categorize_result, dict) and "entities" in categorize_result:
