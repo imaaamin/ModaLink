@@ -107,6 +107,8 @@ class Neo4jExporter:
         """Context manager exit."""
         self.close()
     
+    _SOURCE_TAG = "document_extractor"
+
     def export_graph(
         self,
         document_graph: DocumentGraph,
@@ -115,12 +117,12 @@ class Neo4jExporter:
     ) -> Dict[str, Any]:
         """
         Export a document graph to Neo4j.
-        
+
         Args:
             document_graph: The document graph to export
-            clear_existing: Whether to clear existing nodes/relationships before importing
+            clear_existing: Whether to clear nodes/relationships created by this tool before importing
             merge_duplicates: Whether to merge nodes with the same name and type
-        
+
         Returns:
             Dictionary with export statistics
         """
@@ -131,12 +133,15 @@ class Neo4jExporter:
                 "entities_merged": 0,
                 "errors": []
             }
-            
+
             try:
-                # Clear existing data if requested
+                # Clear only data created by this tool (scoped by _source tag)
                 if clear_existing:
-                    session.run("MATCH (n) DETACH DELETE n")
-                    print("Cleared existing graph data.")
+                    session.run(
+                        "MATCH (n {_source: $source}) DETACH DELETE n",
+                        {"source": self._SOURCE_TAG}
+                    )
+                    print("Cleared existing graph data created by DocumentExtractor.")
                 
                 # Create or merge entities
                 for entity in document_graph.entities:
@@ -179,37 +184,41 @@ class Neo4jExporter:
                                 "e.name = $name",
                                 "e.type = $type",
                                 "e.description = $description",
+                                "e._source = $source",
                                 "e.created = timestamp()"
                             ]
                             match_clauses = [
                                 "e.name = $name",
                                 "e.type = $type",
                                 "e.description = $description",
+                                "e._source = $source",
                                 "e.updated = timestamp()"
                             ]
                             
                             # Add additional properties to SET clauses
+                            sanitized_additional = {}
                             if additional_props:
                                 for prop_key, prop_value in additional_props.items():
                                     sanitized_key = Neo4jExporter._sanitize_property_name(prop_key)
-                                    # Use sanitized key for property name, original key for parameter
-                                    set_clauses.append(f"e.`{sanitized_key}` = ${prop_key}")
-                                    match_clauses.append(f"e.`{sanitized_key}` = ${prop_key}")
-                            
+                                    set_clauses.append(f"e.`{sanitized_key}` = $`{sanitized_key}`")
+                                    match_clauses.append(f"e.`{sanitized_key}` = $`{sanitized_key}`")
+                                    sanitized_additional[sanitized_key] = prop_value
+
                             query = f"""
                             MERGE (e:`{label}` {{id: $id}})
                             ON CREATE SET {', '.join(set_clauses)}
                             ON MATCH SET {', '.join(match_clauses)}
                             RETURN e
                             """
-                            
+
                             params = {
                                 "id": entity.id,
                                 "name": entity.name,
                                 "type": entity.type,
-                                "description": entity.description or ""
+                                "description": entity.description or "",
+                                "source": self._SOURCE_TAG
                             }
-                            params.update(additional_props)
+                            params.update(sanitized_additional)
                             
                             result = session.run(query, params)
                             record = result.single()
@@ -217,21 +226,24 @@ class Neo4jExporter:
                                 stats["entities_created"] += 1
                         else:
                             # Use CREATE to always create new nodes
-                            # Build property dictionary
+                            # Build property dictionary with sanitized keys
                             props_dict = {
                                 "id": entity.id,
                                 "name": entity.name,
                                 "type": entity.type,
-                                "description": entity.description or ""
+                                "description": entity.description or "",
+                                "_source": self._SOURCE_TAG
                             }
-                            props_dict.update(additional_props)
-                            
+                            for prop_key, prop_value in additional_props.items():
+                                sanitized_key = Neo4jExporter._sanitize_property_name(prop_key)
+                                props_dict[sanitized_key] = prop_value
+
                             # Build CREATE query with all properties
-                            props_str = ", ".join([f"`{Neo4jExporter._sanitize_property_name(k)}`: ${k}" for k in props_dict.keys()])
+                            props_str = ", ".join([f"`{k}`: ${k}" for k in props_dict.keys()])
                             query = f"""
                             CREATE (e:`{label}` {{{props_str}}})
                             """
-                            
+
                             session.run(query, props_dict)
                             stats["entities_created"] += 1
                     
@@ -278,23 +290,26 @@ class Neo4jExporter:
                             "r.id = $rel_id",
                             "r.description = $description",
                             "r.confidence = $confidence",
+                            "r._source = $source",
                             "r.created = timestamp()"
                         ]
                         match_clauses = [
                             "r.id = $rel_id",
                             "r.description = $description",
                             "r.confidence = $confidence",
+                            "r._source = $source",
                             "r.updated = timestamp()"
                         ]
                         
                         # Add additional properties to SET clauses
+                        sanitized_additional = {}
                         if additional_props:
                             for prop_key, prop_value in additional_props.items():
                                 sanitized_key = Neo4jExporter._sanitize_property_name(prop_key)
-                                # Use sanitized key for property name, original key for parameter
-                                set_clauses.append(f"r.`{sanitized_key}` = ${prop_key}")
-                                match_clauses.append(f"r.`{sanitized_key}` = ${prop_key}")
-                        
+                                set_clauses.append(f"r.`{sanitized_key}` = $`{sanitized_key}`")
+                                match_clauses.append(f"r.`{sanitized_key}` = $`{sanitized_key}`")
+                                sanitized_additional[sanitized_key] = prop_value
+
                         # Find source and target nodes by id (they can have any label now)
                         # Create relationship with properties
                         query = f"""
@@ -304,15 +319,16 @@ class Neo4jExporter:
                         ON CREATE SET {', '.join(set_clauses)}
                         ON MATCH SET {', '.join(match_clauses)}
                         """
-                        
+
                         params = {
                             "source_id": relation.source_entity_id,
                             "target_id": relation.target_entity_id,
                             "rel_id": relation.id,
                             "description": relation.description or "",
-                            "confidence": relation.confidence
+                            "confidence": relation.confidence,
+                            "source": self._SOURCE_TAG
                         }
-                        params.update(additional_props)
+                        params.update(sanitized_additional)
                         
                         session.run(query, params)
                         stats["relations_created"] += 1
