@@ -48,51 +48,42 @@ class Neo4jExporter:
         self.driver = GraphDatabase.driver(uri, auth=(user, self.password))
     
     @staticmethod
-    def _sanitize_property_name(name: str) -> str:
+    def _sanitize_identifier(name: str, fallback: str = "_property") -> str:
         """
-        Sanitize a property name to be a valid Neo4j identifier.
-        
+        Sanitize a string to be a safe Neo4j identifier (label, property name, or parameter name).
+
+        Only allows ASCII letters, digits, and underscores. This prevents injection
+        via unicode characters, backticks, or other special characters from LLM output.
+
         Args:
-            name: Property name to sanitize
-            
+            name: The identifier to sanitize
+            fallback: Default value if sanitization produces an empty string
+
         Returns:
-            Sanitized property name
+            Sanitized identifier containing only [a-zA-Z0-9_]
         """
-        # Replace invalid characters with underscores
-        sanitized = "".join(c if c.isalnum() or c == "_" else "_" for c in name)
-        # Ensure it doesn't start with a number
-        if sanitized and sanitized[0].isdigit():
-            sanitized = "_" + sanitized
-        # Ensure it's not empty
-        if not sanitized:
-            sanitized = "_property"
-        return sanitized
-    
-    @staticmethod
-    def _sanitize_label(label: str) -> str:
-        """
-        Sanitize a label name to be a valid Neo4j identifier.
-        
-        Args:
-            label: The label name to sanitize
-            
-        Returns:
-            Sanitized label name
-        """
-        # Replace spaces and hyphens with underscores
-        # Remove any other special characters that aren't valid in Neo4j identifiers
         import re
-        # Keep only alphanumeric and underscores, replace others with underscore
-        sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', label)
-        # Remove leading/trailing underscores and multiple consecutive underscores
+        # Strip to ASCII alphanumeric and underscores only
+        sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+        # Collapse consecutive underscores and strip leading/trailing
         sanitized = re.sub(r'_+', '_', sanitized).strip('_')
         # Ensure it starts with a letter or underscore
-        if sanitized and not sanitized[0].isalpha() and sanitized[0] != '_':
+        if sanitized and sanitized[0].isdigit():
             sanitized = '_' + sanitized
-        # If empty after sanitization, use a default
+        # Fallback if empty
         if not sanitized:
-            sanitized = 'ENTITY'
+            sanitized = fallback
         return sanitized
+
+    @classmethod
+    def _sanitize_property_name(cls, name: str) -> str:
+        """Sanitize a property name to be a valid Neo4j identifier."""
+        return cls._sanitize_identifier(name, fallback="_property")
+
+    @classmethod
+    def _sanitize_label(cls, label: str) -> str:
+        """Sanitize a label name to be a valid Neo4j identifier."""
+        return cls._sanitize_identifier(label, fallback="ENTITY")
     
     def close(self):
         """Close the Neo4j driver connection."""
