@@ -1,0 +1,151 @@
+name: Test
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      neo4j:
+        image: neo4j:5-community
+        env:
+          NEO4J_AUTH: neo4j/testpassword
+          NEO4J_PLUGINS: '["apoc"]'
+          NEO4J_dbms_memory_heap_max__size: 512M
+        ports:
+          - 7474:7474  # HTTP
+          - 7687:7687  # Bolt
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Verify test fixture exists
+      run: |
+        echo "Checking for test fixture..."
+        ls -la tests/fixtures/ || echo "fixtures directory not found"
+        if [ -f "tests/fixtures/LegalUber.pdf" ]; then
+          echo "✓ Test fixture found"
+          ls -lh tests/fixtures/LegalUber.pdf
+        else
+          echo "✗ Test fixture not found"
+          echo "Current directory: $(pwd)"
+          echo "Files in tests/:"
+          ls -la tests/ || echo "tests directory not found"
+        fi
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y netcat-openbsd curl
+    
+    - name: Install dependencies
+      run: |
+        uv sync --all-extras
+    
+    - name: Verify GROQ_API_KEY is set
+      run: |
+        if [ -z "$GROQ_API_KEY" ]; then
+          echo "::error::GROQ_API_KEY secret is not set in GitHub repository secrets."
+          echo "Please add it in: Settings → Secrets and variables → Actions → New repository secret"
+          echo "Name: GROQ_API_KEY"
+          echo "Value: Your Groq API key from https://console.groq.com"
+          exit 1
+        else
+          # Check if key looks valid (starts with gsk_ and has reasonable length)
+          if [[ "$GROQ_API_KEY" =~ ^gsk_[a-zA-Z0-9]{20,}$ ]]; then
+            echo "✓ GROQ_API_KEY is set and format looks valid"
+          else
+            echo "::warning::GROQ_API_KEY format may be incorrect. Groq API keys typically start with 'gsk_'"
+            echo "Please verify your API key at https://console.groq.com/keys"
+          fi
+        fi
+      env:
+        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+    
+    - name: Set up environment variables
+      run: |
+        echo "NEO4J_URI=bolt://localhost:7687" >> $GITHUB_ENV
+        echo "NEO4J_USER=neo4j" >> $GITHUB_ENV
+        echo "NEO4J_PASSWORD=testpassword" >> $GITHUB_ENV
+        echo "NEO4J_DATABASE=neo4j" >> $GITHUB_ENV
+        echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> $GITHUB_ENV
+    
+    - name: Wait for Neo4j to be ready
+      run: |
+        echo "Waiting for Neo4j to be ready..."
+        for i in {1..30}; do
+          if curl -f http://localhost:7474 > /dev/null 2>&1; then
+            echo "Neo4j HTTP endpoint is ready"
+            # Also check Bolt port
+            if nc -z localhost 7687 2>/dev/null; then
+              echo "Neo4j Bolt endpoint is ready"
+              exit 0
+            fi
+          fi
+          echo "Attempt $i: Neo4j not ready yet, waiting..."
+          sleep 2
+        done
+        echo "Neo4j failed to start within timeout"
+        exit 1
+    
+    - name: Verify Neo4j connection
+      run: |
+        uv run python -c "
+        from src.neo4j_exporter import Neo4jExporter
+        import os
+        exporter = Neo4jExporter(
+            uri=os.getenv('NEO4J_URI', 'bolt://localhost:7687'),
+            user=os.getenv('NEO4J_USER', 'neo4j'),
+            password=os.getenv('NEO4J_PASSWORD', 'testpassword'),
+            database=os.getenv('NEO4J_DATABASE', 'neo4j')
+        )
+        with exporter:
+            with exporter.driver.session() as session:
+                result = session.run('RETURN 1 as test')
+                record = result.single()
+                assert record['test'] == 1
+                print('✓ Neo4j connection verified')
+        "
+    
+    - name: Run tests
+      env:
+        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        NEO4J_URI: bolt://localhost:7687
+        NEO4J_USER: neo4j
+        NEO4J_PASSWORD: testpassword
+        NEO4J_DATABASE: neo4j
+      run: |
+        uv run pytest tests/ -v --tb=short
+    
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          .pytest_cache/
+          htmlcov/
+        retention-days: 7
