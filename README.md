@@ -125,8 +125,7 @@ DocumentExtractor/
 │   ├── __init__.py
 │   ├── graph_visualizer.py       # Graph visualization and export utilities (JSON, GraphML)
 │   ├── visualize_graph.py        # Graph visualization script with edge labels
-│   ├── export_to_neo4j.py        # Standalone Neo4j export script
-│   └── fetch_pr_comments.py      # Utility to fetch GitHub PR comments
+│   └── export_to_neo4j.py        # Standalone Neo4j export script
 ├── main.py                        # CLI entry point (clears Neo4j by default; use --merge to keep existing)
 ├── pyproject.toml                 # Project dependencies (uv)
 └── README.md
@@ -192,17 +191,6 @@ uv run python scripts/visualize_graph.py outputs/your_file_graph.json graph.png
 **Export to Neo4j:**
 ```bash
 uv run python scripts/export_to_neo4j.py outputs/your_file_graph.json [--clear]
-```
-
-**Fetch GitHub PR Comments:**
-```bash
-uv run python scripts/fetch_pr_comments.py <owner> <repo> <pr_number> [output_file]
-```
-
-Example:
-```bash
-uv run python scripts/fetch_pr_comments.py microsoft vscode 12345
-uv run python scripts/fetch_pr_comments.py microsoft vscode 12345 comments.json
 ```
 
 ### Option 2: External Tools
@@ -337,7 +325,6 @@ The codebase is organized into logical modules:
   - `graph_visualizer.py`: Graph visualization and export utilities (JSON, GraphML)
   - `visualize_graph.py`: Graph visualization script with edge labels
   - `export_to_neo4j.py`: Standalone script to export JSON graphs to Neo4j
-  - `fetch_pr_comments.py`: Utility to fetch GitHub PR comments
 
 ## Testing
 
