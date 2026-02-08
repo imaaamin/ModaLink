@@ -33,9 +33,9 @@ def main():
         help="Path to the document file to process"
     )
     parser.add_argument(
-        "--clear",
+        "--merge",
         action="store_true",
-        help="Clear existing Neo4j database before importing new data"
+        help="Merge with existing Neo4j data (default: clear graph first, then import new extraction)"
     )
     
     args = parser.parse_args()
@@ -101,15 +101,16 @@ def main():
                 from src.neo4j_exporter import Neo4jExporter
                 
                 print("\nExporting to Neo4j...")
-                if args.clear:
-                    print("⚠ Clearing existing Neo4j database...")
+                clear_first = not args.merge
+                if clear_first:
+                    print("Clearing existing graph, then importing new extraction...")
                 with Neo4jExporter(
                     uri=neo4j_uri,
                     user=neo4j_user,
                     password=neo4j_password,
                     database=os.getenv("NEO4J_DATABASE", "neo4j")
                 ) as exporter:
-                    stats = exporter.export_graph(graph, clear_existing=args.clear, merge_duplicates=True)
+                    stats = exporter.export_graph(graph, clear_existing=clear_first, merge_duplicates=True)
                     
                     print(f"✓ Neo4j export complete!")
                     print(f"  - Entities created: {stats['entities_created']}")
@@ -148,11 +149,28 @@ def main():
                 print(f"  - {source.name} --[{relation.relation_type}]--> {target.name}")
                 if relation.description:
                     print(f"    Description: {relation.description}")
+                # Show relation attributes (e.g. start_date, end_date, role)
+                attrs = relation.get_all_properties()
+                extra = {k: v for k, v in attrs.items() if k not in (
+                    "id", "source_entity_id", "target_entity_id", "relation_type", "description", "confidence"
+                ) and v is not None}
+                if extra:
+                    print(f"    Attributes: {extra}")
         
         if len(graph.relations) > 5:
             print(f"  ... and {len(graph.relations) - 5} more relations")
         
+    except ValueError as e:
+        if "Groq API key" in str(e) or "GROQ_API_KEY" in str(e):
+            print(f"\n✗ {e}")
+            sys.exit(1)
+        raise
     except Exception as e:
+        msg = str(e)
+        if "401" in msg or "invalid_api_key" in msg or "Invalid API Key" in msg or "GROQ_API_KEY" in msg:
+            print(f"\n✗ Groq API key is invalid or rejected (401).")
+            print("  Check GROQ_API_KEY in your .env file. Get a valid key at https://console.groq.com")
+            sys.exit(1)
         print(f"\n✗ Error during extraction: {e}")
         import traceback
         traceback.print_exc()

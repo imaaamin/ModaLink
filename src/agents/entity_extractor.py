@@ -75,12 +75,10 @@ class EntityExtractor:
         # Step 1: Extract all entities from the document without predefined types
         extract_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are an expert entity extraction system. Extract all meaningful entities from the given text.
-
 For each entity, provide:
 - id: A unique identifier (e.g., "entity_1", "entity_2")
 - name: The exact name or phrase as it appears in the text
 - description: A brief description or context about the entity
-
 Additionally, extract ALL available properties for each entity based on the text context. Common properties include:
 - For PERSON: email, phone, title, role, age, birth_date, location, address, etc.
 - For ORGANIZATION: website, industry, founded_date, location, address, size, revenue, etc.
@@ -90,7 +88,6 @@ Additionally, extract ALL available properties for each entity based on the text
 - For EVENT: start_date, end_date, location, participants, etc.
 - For DOCUMENT: author, publication_date, version, pages, etc.
 - And any other relevant properties mentioned in the text
-
 Include these properties directly in the entity object (not just in metadata). Extract as many properties as are available in the text.
 Return a JSON array of entities. Each entity should be unique - do not duplicate entities with the same name."""),
             ("human", "Extract all entities from the following text. Include all available properties for each entity:\n\n{text}\n\nReturn only valid JSON array of entities with all their properties.")
@@ -135,20 +132,17 @@ Return a JSON array of entities. Each entity should be unique - do not duplicate
             # Step 2: Categorize entities into types
             categorize_prompt = ChatPromptTemplate.from_messages([
                 ("system", """You are an expert entity categorization system. Categorize the extracted entities into appropriate types.
-
 Given a list of entities, assign each one a type that best describes it. Common types include:
 PERSON, ORGANIZATION, LOCATION, DATE, TIME, MONEY, PRODUCT, EVENT, TECHNOLOGY, CONCEPT, etc.
-
 For each entity, provide:
 - id: The original entity id
 - type: A category/type that best describes this entity
 - name: The original entity name
 - description: The original description
 - ALL original properties: Preserve all properties that were extracted (email, phone, location, dates, etc.)
-
 IMPORTANT: Keep all properties from the original entity extraction. Do not remove any properties - only add the type field.
 Return a JSON array with the same entities but with type assigned to each, preserving all other properties."""),
-                ("human", "Categorize these entities into types. Preserve all properties from the original extraction:\n\n{entities_json}\n\nReturn only valid JSON array of entities with types assigned, keeping all original properties.")
+               ("human", "Categorize these entities into types. Preserve all properties from the original extraction:\n\n{entities_json}\n\nReturn only valid JSON array of entities with types assigned, keeping all original properties.")
             ])
             
             categorize_chain = categorize_prompt | self.llm
@@ -192,7 +186,7 @@ Return a JSON array with the same entities but with type assigned to each, prese
                     entity_data_copy["type"] = "UNKNOWN"
                     categorized_entities.append(entity_data_copy)
             
-            # Parse categorized entities into Entity objects
+            # Parse categorized entities into Entity objects; exclude DATE/TIME (temporal data belongs on relations)
             entities = []
             for i, entity_data in enumerate(categorized_entities):
                 try:
@@ -204,6 +198,10 @@ Return a JSON array with the same entities but with type assigned to each, prese
                     if "type" not in entity_data:
                         entity_data["type"] = "UNKNOWN"
                     
+                    # Skip dates and times — they should be relation attributes, not entities
+                    if entity_data.get("type", "").upper() in ("DATE", "TIME"):
+                        continue
+                    
                     entity = Entity(**entity_data)
                     entities.append(entity)
                 except Exception as e:
@@ -213,5 +211,11 @@ Return a JSON array with the same entities but with type assigned to each, prese
             return entities
             
         except Exception as e:
+            err_msg = str(e).lower()
+            if "401" in err_msg or "invalid_api_key" in err_msg or "invalid api key" in err_msg:
+                raise ValueError(
+                    "Groq API key is invalid or rejected (401). "
+                    "Check GROQ_API_KEY in your .env file. Get a valid key at https://console.groq.com"
+                ) from e
             print(f"Error extracting entities: {e}")
             return []

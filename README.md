@@ -39,20 +39,20 @@ Get your Groq API key from [console.groq.com](https://console.groq.com)
 ### Basic Usage
 
 ```bash
-uv run python main.py <document_path> [--clear]
+uv run python main.py <document_path> [--merge]
 ```
 
 Examples:
 ```bash
-# Extract and merge with existing Neo4j data
+# Extract and import to Neo4j (clears existing graph, then adds new extraction)
 uv run python main.py documents/sample.pdf
 
-# Extract and clear Neo4j database before importing
-uv run python main.py documents/sample.pdf --clear
+# Extract and merge with existing Neo4j data (do not clear first)
+uv run python main.py documents/sample.pdf --merge
 ```
 
 **Options:**
-- `--clear`: Clear existing Neo4j database before importing new data (default: merge with existing data)
+- `--merge`: Merge with existing Neo4j data instead of clearing the graph first (default: clear then import)
 
 ### Programmatic Usage
 
@@ -81,6 +81,23 @@ visualizer.export_to_json(graph, "output.json")
 visualizer.export_to_graphml(graph, "output.graphml")
 ```
 
+### Working with relation attributes
+
+Invoking the graph is the same: `graph = extractor.extract(path)` returns a `DocumentGraph` with `entities` and `relations`. Dates and times are stored as **attributes on relations** (e.g. `start_date`, `end_date`, `occurred_on`), not as DATE/TIME entities.
+
+- **Access all properties on a relation** (including temporal and other attributes):
+  ```python
+  for rel in graph.relations:
+      props = rel.get_all_properties()  # id, relation_type, description, start_date, end_date, role, ...
+      if "start_date" in props:
+          print(rel.relation_type, props["start_date"])
+  ```
+- **Query relations that have a given attribute**:
+  ```python
+  dated_relations = graph.get_relations_with_attribute("start_date")
+  ```
+- **JSON / Neo4j**: Relation attributes are included in `export_to_json` (via `model_dump()`) and exported to Neo4j as relationship properties. In Cypher you can filter by them, e.g. `MATCH (a)-[r:WORKS_FOR]->(b) WHERE r.start_date IS NOT NULL RETURN a, r, b`.
+
 ## Project Structure
 
 ```
@@ -105,7 +122,7 @@ DocumentExtractor/
 │   ├── visualize_graph.py        # Graph visualization script with edge labels
 │   ├── export_to_neo4j.py        # Standalone Neo4j export script
 │   └── fetch_pr_comments.py      # Utility to fetch GitHub PR comments
-├── main.py                        # CLI entry point with --clear option
+├── main.py                        # CLI entry point (clears Neo4j by default; use --merge to keep existing)
 ├── pyproject.toml                 # Project dependencies (uv)
 └── README.md
 ```

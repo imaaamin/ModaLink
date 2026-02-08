@@ -2,6 +2,11 @@
 
 import os
 from pathlib import Path
+
+# On Windows, disable Hugging Face cache symlinks to avoid WinError 1314
+# ("A required privilege is not held by the client"). Using copies instead.
+if os.name == "nt":
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 from typing import Optional
 
 try:
@@ -47,6 +52,16 @@ class DocumentProcessor:
             try:
                 self.converter = DocumentConverter()
                 print("✓ Docling initialized successfully")
+            except OSError as e:
+                if getattr(e, "winerror", None) == 1314:
+                    print(
+                        "✗ Docling failed (Windows symlink privilege). "
+                        "Falling back to pypdf. Enable Developer Mode to use docling."
+                    )
+                    self.use_docling = False
+                else:
+                    print(f"✗ Failed to initialize docling: {e}")
+                    raise
             except Exception as e:
                 print(f"✗ Failed to initialize docling: {e}")
                 raise
@@ -105,6 +120,16 @@ class DocumentProcessor:
                 
                 raise ValueError("Docling extraction returned empty text")
                 
+            except OSError as e:
+                if getattr(e, "winerror", None) == 1314:
+                    print(
+                        "✗ Docling failed (Windows symlink privilege). "
+                        "Falling back to pypdf for this document."
+                    )
+                    self.use_docling = False
+                else:
+                    print(f"✗ Docling extraction failed: {e}")
+                    raise
             except Exception as e:
                 print(f"✗ Docling extraction failed: {e}")
                 import traceback
