@@ -3,29 +3,25 @@
 import os
 import re
 from typing import List, Dict, Any
-from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from src.models.entity import Entity
+from src.model_provider import create_llm
 import json
 
 
 class EntityExtractor:
     """Extracts entities from document text using LLM."""
-    
-    def __init__(self, model_name: str = "openai/gpt-oss-120b", temperature: float = 0.0):
+
+    def __init__(self, model_name: str = None, temperature: float = 0.0):
         """
         Initialize the entity extractor.
-        
+
         Args:
-            model_name: Name of the Groq LLM model to use (e.g., "openai/gpt-oss-120b", "llama-3.1-70b-versatile", "mixtral-8x7b-32768")
+            model_name: Model name override. If None, auto-selects based on available API key.
             temperature: Temperature for the LLM
         """
-        self.llm = ChatGroq(
-            model=model_name,
-            temperature=temperature,
-            api_key=os.getenv("GROQ_API_KEY")
-        )
+        self.llm = create_llm(model_name, temperature)
         self.parser = JsonOutputParser(pydantic_object=Entity)
     
     def _extract_json_from_markdown(self, text: str) -> str:

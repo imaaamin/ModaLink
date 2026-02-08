@@ -29,10 +29,14 @@ uv sync
 3. Set up environment variables:
 ```bash
 cp .env.example .env
-# Edit .env and add your GROQ_API_KEY
+# Edit .env and add your API key(s)
 ```
 
-Get your Groq API key from [console.groq.com](https://console.groq.com)
+The system supports two LLM providers with automatic fallback:
+- **Google Gemini** (primary): Set `GOOGLE_API_KEY` — get one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+- **Groq** (fallback): Set `GROQ_API_KEY` — get one at [console.groq.com](https://console.groq.com)
+
+At least one API key is required. If both are set, Gemini is used.
 
 ## Usage
 
@@ -68,8 +72,8 @@ from graph_visualizer import GraphVisualizer
 
 load_dotenv()
 
-# Initialize extractor
-extractor = DocumentExtractionGraph(model_name="openai/gpt-oss-120b")
+# Initialize extractor (auto-selects provider based on available API key)
+extractor = DocumentExtractionGraph()
 
 # Extract entities and relations
 graph = extractor.extract("path/to/document.pdf")
@@ -114,6 +118,7 @@ DocumentExtractor/
 │   │   ├── entity.py             # Entity model
 │   │   ├── relation.py           # Relation model
 │   │   └── document_graph.py     # DocumentGraph model
+│   ├── model_provider.py         # LLM provider factory (Gemini primary, Groq fallback)
 │   ├── document_processor.py     # Document text extraction using docling
 │   └── neo4j_exporter.py         # Neo4j database export with Cypher queries
 ├── scripts/
@@ -252,21 +257,21 @@ The system uses a **dynamic extraction approach** that adapts to document conten
 ## Requirements
 
 - Python 3.10+
-- Groq API key (get one at [console.groq.com](https://console.groq.com))
+- An LLM API key: `GOOGLE_API_KEY` (Gemini) or `GROQ_API_KEY` (Groq)
 - `uv` package manager
 
-### Available Groq Models
+### LLM Provider Selection
 
-The default model is `openai/gpt-oss-120b`. Other available models include:
-- `openai/gpt-oss-120b` (default)
-- `llama-3.1-8b-instant`
-- `llama-3.1-70b-versatile`
-- `mixtral-8x7b-32768`
-- `gemma-7b-it`
+The system uses `src/model_provider.py` to auto-select the LLM provider based on available API keys:
 
-You can specify a different model when initializing the extractor:
+| Provider | Env Variable | Default Model |
+|----------|-------------|---------------|
+| Google Gemini (primary) | `GOOGLE_API_KEY` | `gemini-2.0-flash` |
+| Groq (fallback) | `GROQ_API_KEY` | `openai/gpt-oss-120b` |
+
+You can override the model when initializing the extractor:
 ```python
-extractor = DocumentExtractionGraph(model_name="llama-3.1-70b-versatile")
+extractor = DocumentExtractionGraph(model_name="gemini-2.5-pro-preview-05-06")
 ```
 
 ### Document Processing with Docling
@@ -324,6 +329,7 @@ The codebase is organized into logical modules:
   - `document_graph.py`: DocumentGraph model containing entities and relations
 
 - **`src/`**: Core utilities:
+  - `model_provider.py`: LLM provider factory (Gemini primary, Groq fallback)
   - `document_processor.py`: Document text extraction (docling, pypdf, python-docx, OCR)
   - `neo4j_exporter.py`: Neo4j database export functionality
 
@@ -364,7 +370,7 @@ Tests run automatically on GitHub Actions for every push and pull request. The C
 - Validates Neo4j export functionality
 
 **GitHub Actions Setup:**
-1. Add `GROQ_API_KEY` as a repository secret in GitHub Settings → Secrets and variables → Actions
+1. Add `GOOGLE_API_KEY` or `GROQ_API_KEY` as a repository secret in GitHub Settings → Secrets and variables → Actions
 2. The workflow automatically sets up Neo4j in a Docker container
 3. Tests run against the containerized Neo4j instance
 

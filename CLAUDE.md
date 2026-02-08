@@ -32,7 +32,9 @@ uv run pytest tests/ -m "not integration"
 ## Environment Variables
 
 Requires a `.env` file (see `.env.example`):
-- `GROQ_API_KEY` - Required. Groq API key (format: `gsk_*`)
+- `GOOGLE_API_KEY` - Google Gemini API key (primary). Get one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+- `GROQ_API_KEY` - Groq API key (fallback, used if `GOOGLE_API_KEY` is not set)
+- At least one of the above is required.
 - `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE` - Required for Neo4j export
 
 ## Architecture
@@ -74,10 +76,14 @@ Multi-format with fallback chain: Docling (preferred) → format-specific librar
 
 Exports `DocumentGraph` to Neo4j. Entity types become node labels, relation types become relationship names. Supports merge-on-id for deduplication. Complex types (lists, dicts) are serialized to JSON strings for Neo4j compatibility.
 
+### LLM Provider (`src/model_provider.py`)
+
+`create_llm(model_name, temperature)` factory that auto-selects the provider based on available API keys: `GOOGLE_API_KEY` → Gemini (default model: `gemini-2.0-flash`), `GROQ_API_KEY` → Groq (default model: `openai/gpt-oss-120b`). Both extractors and the extraction graph use this factory. Pass `model_name` to override the default for the active provider.
+
 ## LLM Configuration
 
-Uses Groq API via `langchain-groq` (`ChatGroq`). Default model in `main.py`: `openai/gpt-oss-120b`. Both extractors accept `model_name` and `temperature` params. LLM responses are expected as JSON; the extractors handle markdown code block stripping and JSON parsing.
+LLM responses are expected as JSON; the extractors handle markdown code block stripping and JSON parsing. Both extractors accept `model_name` and `temperature` params.
 
 ## Testing
 
-Tests are integration tests that require both `GROQ_API_KEY` and a running Neo4j instance. Test fixture: `tests/fixtures/LegalUber.pdf`. CI runs Neo4j 5 Community Edition as a Docker service. Markers: `@pytest.mark.integration`, `@pytest.mark.slow`.
+Tests are integration tests that require an LLM API key (`GOOGLE_API_KEY` or `GROQ_API_KEY`) and a running Neo4j instance. Test fixture: `tests/fixtures/LegalUber.pdf`. CI runs Neo4j 5 Community Edition as a Docker service. Markers: `@pytest.mark.integration`, `@pytest.mark.slow`.

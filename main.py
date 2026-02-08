@@ -19,9 +19,9 @@ def main():
     load_dotenv()
     
     # Check for API key
-    if not os.getenv("GROQ_API_KEY"):
-        print("Error: GROQ_API_KEY not found in environment variables.")
-        print("Please set it in your .env file or environment.")
+    if not os.getenv("GOOGLE_API_KEY") and not os.getenv("GROQ_API_KEY"):
+        print("Error: No LLM API key found.")
+        print("Please set GOOGLE_API_KEY or GROQ_API_KEY in your .env file.")
         sys.exit(1)
     
     # Parse command line arguments
@@ -50,7 +50,6 @@ def main():
     
     # Initialize the extraction graph
     extractor = DocumentExtractionGraph(
-        model_name="openai/gpt-oss-120b",
         temperature=0.0
     )
     
@@ -161,15 +160,15 @@ def main():
             print(f"  ... and {len(graph.relations) - 5} more relations")
         
     except ValueError as e:
-        if "Groq API key" in str(e) or "GROQ_API_KEY" in str(e):
+        if "API key" in str(e) or "API_KEY" in str(e):
             print(f"\n✗ {e}")
             sys.exit(1)
         raise
     except Exception as e:
         msg = str(e)
-        if "401" in msg or "invalid_api_key" in msg or "Invalid API Key" in msg or "GROQ_API_KEY" in msg:
-            print(f"\n✗ Groq API key is invalid or rejected (401).")
-            print("  Check GROQ_API_KEY in your .env file. Get a valid key at https://console.groq.com")
+        if "401" in msg or "403" in msg or "invalid_api_key" in msg or "Invalid API Key" in msg:
+            print(f"\n✗ API key is invalid or rejected.")
+            print("  Check GOOGLE_API_KEY or GROQ_API_KEY in your .env file.")
             sys.exit(1)
         print(f"\n✗ Error during extraction: {e}")
         import traceback

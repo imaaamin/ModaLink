@@ -26,14 +26,14 @@ class DocumentExtractionGraph:
     
     def __init__(
         self,
-        model_name: str = "openai/gpt-oss-120b",
+        model_name: str = None,
         temperature: float = 0.0
     ):
         """
         Initialize the extraction graph.
-        
+
         Args:
-            model_name: Name of the Groq LLM model to use (e.g., "openai/gpt-oss-120b", "llama-3.1-70b-versatile", "mixtral-8x7b-32768")
+            model_name: Model name override. If None, auto-selects based on available API key.
             temperature: Temperature for the LLM
         """
         self.processor = DocumentProcessor(use_docling=True)  # Use docling for better text extraction
