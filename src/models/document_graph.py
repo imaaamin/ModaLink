@@ -4,6 +4,8 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from .entity import Entity
 from .relation import Relation
+from .document import Document
+from .chunk import Chunk
 
 
 class DocumentGraph(BaseModel):
@@ -13,11 +15,15 @@ class DocumentGraph(BaseModel):
     Relations can have extra attributes (e.g. start_date, end_date, occurred_on, role) stored on
     the relation, not as separate entities. Access them via relation.get_all_properties() or
     relation.<attr> (e.g. relation.start_date) when present.
+    Optional document and chunks: document node (docId, title, source, publishedDate), chunks
+    linked Document->first chunk and chunk->next chunk; entities linked to chunks via source_chunk_id.
     """
 
     entities: List[Entity] = Field(default_factory=list, description="List of extracted entities")
     relations: List[Relation] = Field(default_factory=list, description="List of extracted relations")
     document_id: Optional[str] = Field(default=None, description="Identifier for the source document")
+    document: Optional[Document] = Field(default=None, description="Source document node (docId, title, source, publishedDate)")
+    chunks: List[Chunk] = Field(default_factory=list, description="Ordered text chunks; Document->first chunk, chunk->next chunk")
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional document metadata")
 
     def get_entity_by_id(self, entity_id: str) -> Optional[Entity]:

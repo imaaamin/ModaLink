@@ -141,19 +141,26 @@ class TestExtractionIntegration:
         ) as exporter:
             exporter.export_graph(graph, clear_existing=True, merge_duplicates=True)
             
-            # Check a few entities have their properties
+            # Check a few entities have their properties (exclude Chunk and Document nodes; only entity nodes)
             with exporter.driver.session(database=clean_neo4j_db["database"]) as session:
-                # Get an entity with additional properties
                 query = """
                 MATCH (n)
                 WHERE n.id IS NOT NULL
+                  AND NOT 'Chunk' IN labels(n)
+                  AND NOT 'Document' IN labels(n)
                 RETURN n.id as id, n.name as name, keys(n) as properties
                 LIMIT 10
                 """
                 result = session.run(query)
-                
+                entities = list(result)
+                if not entities:
+                    pytest.fail(
+                        "No entity nodes found in Neo4j. "
+                        "Verify export_graph writes entity nodes with 'id'. "
+                        f"Graph has {len(graph.entities)} entities."
+                    )
                 entities_checked = 0
-                for record in result:
+                for record in entities:
                     entity_id = record["id"]
                     properties = record["properties"]
                     

@@ -37,6 +37,11 @@ def main():
         action="store_true",
         help="Merge with existing Neo4j data (default: clear graph first, then import new extraction)"
     )
+    parser.add_argument(
+        "--no-embed",
+        action="store_true",
+        help="Skip storing vector embeddings on Neo4j nodes (by default embeddings are stored for semantic search, Neo4j 5.13+)"
+    )
     
     args = parser.parse_args()
     document_path = args.document_path
@@ -98,18 +103,36 @@ def main():
         if neo4j_uri and neo4j_password:
             try:
                 from src.neo4j_exporter import Neo4jExporter
+                from src import embeddings as emb
                 
                 print("\nExporting to Neo4j...")
                 clear_first = not args.merge
+                use_embeddings = not getattr(args, "no_embed", False)
                 if clear_first:
                     print("Clearing existing graph, then importing new extraction...")
+                if use_embeddings:
+                    print("Computing embeddings for vector search...")
+                    # Validate embedder once so failures surface before export
+                    try:
+                        emb.get_embedding_dimension()
+                        emb.embed_text("test")
+                    except Exception as e:
+                        print(f"\n⚠ Embedding setup failed: {e}")
+                        print("  Fix the error above or run with --no-embed to skip embeddings.")
+                        raise
                 with Neo4jExporter(
                     uri=neo4j_uri,
                     user=neo4j_user,
                     password=neo4j_password,
                     database=os.getenv("NEO4J_DATABASE", "neo4j")
                 ) as exporter:
-                    stats = exporter.export_graph(graph, clear_existing=clear_first, merge_duplicates=True)
+                    stats = exporter.export_graph(
+                        graph,
+                        clear_existing=clear_first,
+                        merge_duplicates=True,
+                        embedder=emb.embed_entity if use_embeddings else None,
+                        embedding_dimension=emb.get_embedding_dimension() if use_embeddings else None,
+                    )
                     
                     print(f"✓ Neo4j export complete!")
                     print(f"  - Entities created: {stats['entities_created']}")

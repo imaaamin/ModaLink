@@ -1,20 +1,26 @@
 """LangGraph workflow for document entity and relation extraction."""
 
-from typing import TypedDict, List
+from pathlib import Path
+from typing import TypedDict, List, Optional, Any
 from langgraph.graph import StateGraph, END
 from src.models.document_graph import DocumentGraph
+from src.models.document import Document
+from src.models.chunk import Chunk
 from src.models.entity import Entity
 from src.models.relation import Relation
 from src.document_processor import DocumentProcessor
+from src.chunking import chunk_text
 from .entity_extractor import EntityExtractor
 from .relation_extractor import RelationExtractor
 import os
 
 
-class ExtractionState(TypedDict):
+class ExtractionState(TypedDict, total=False):
     """State for the extraction workflow."""
     document_path: str
     text: str
+    document: Optional[Document]
+    chunks: List[Chunk]
     entities: List[Entity]
     relations: List[Relation]
     graph: DocumentGraph
@@ -63,15 +69,30 @@ class DocumentExtractionGraph:
         return workflow.compile()
     
     def _load_document(self, state: ExtractionState) -> ExtractionState:
-        """Load and process the document."""
+        """Load and process the document; build Document node and chunks."""
         try:
-            print(f"Loading document: {state['document_path']}")
-            text = self.processor.extract_text(state["document_path"])
+            doc_path = state["document_path"]
+            print(f"Loading document: {doc_path}")
+            text = self.processor.extract_text(doc_path)
             state["text"] = text
             state["error"] = ""
+            state["document"] = None
+            state["chunks"] = []
             print(f"Document loaded. Text length: {len(text)} characters")
             if not text or not text.strip():
                 state["error"] = "Document text extraction returned empty result"
+                return state
+            path = Path(doc_path)
+            doc_id = path.stem or doc_path
+            title = path.name
+            state["document"] = Document(
+                doc_id=doc_id,
+                title=title,
+                source=doc_path,
+                published_date=None,
+            )
+            state["chunks"] = chunk_text(text, document_id=doc_id, chunk_size=1000, overlap=200)
+            print(f"Chunked into {len(state['chunks'])} chunks")
         except Exception as e:
             state["error"] = f"Error loading document: {str(e)}"
             import traceback
@@ -79,19 +100,23 @@ class DocumentExtractionGraph:
         return state
     
     def _extract_entities(self, state: ExtractionState) -> ExtractionState:
-        """Extract entities from the document text."""
+        """Extract entities in one LLM call: send full text with chunk separators so the LLM can fill source_chunk_ids for each entity."""
         if state.get("error"):
             return state
         
-        # Check if text is empty
-        if not state.get("text") or not state["text"].strip():
-            state["error"] = "Document text is empty. Cannot extract entities."
+        chunks: List[Chunk] = state.get("chunks") or []
+        if not chunks:
+            state["error"] = "No chunks available. Cannot extract entities."
             state["entities"] = []
             return state
         
         try:
-            print(f"Extracting entities from text (length: {len(state['text'])} characters)...")
-            entities = self.entity_extractor.extract_entities(state["text"])
+            # Build single text with clear chunk separators so the LLM can assign source_chunk_ids
+            separator = "\n\n--- CHUNK {id} ---\n\n"
+            combined_text = "".join(separator.format(id=ch.id) + ch.text for ch in chunks)
+            chunk_ids = [ch.id for ch in chunks]
+            print(f"Extracting entities from document (1 call, {len(chunks)} chunks, {len(combined_text)} chars)...")
+            entities = self.entity_extractor.extract_entities(combined_text, chunk_ids=chunk_ids)
             state["entities"] = entities
             print(f"Extracted {len(entities)} entities")
         except Exception as e:
@@ -120,7 +145,7 @@ class DocumentExtractionGraph:
         return state
     
     def _build_graph_structure(self, state: ExtractionState) -> ExtractionState:
-        """Build the final document graph structure."""
+        """Build the final document graph structure (document, chunks, entities, relations). source_chunk_ids set by LLM from chunk markers in text."""
         if state.get("error"):
             return state
         
@@ -128,11 +153,14 @@ class DocumentExtractionGraph:
             graph = DocumentGraph(
                 entities=state.get("entities", []),
                 relations=state.get("relations", []),
-                document_id=state.get("document_path", ""),
+                document_id=state["document"].doc_id if state.get("document") else state.get("document_path", ""),
+                document=state.get("document"),
+                chunks=state.get("chunks") or [],
                 metadata={
                     "text_length": len(state.get("text", "")),
                     "num_entities": len(state.get("entities", [])),
-                    "num_relations": len(state.get("relations", []))
+                    "num_relations": len(state.get("relations", [])),
+                    "num_chunks": len(state.get("chunks") or []),
                 }
             )
             state["graph"] = graph
