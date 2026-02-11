@@ -11,8 +11,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 from src.neo4j_exporter import Neo4jExporter
 from src.models.document_graph import DocumentGraph
+from src.models.document import Document
+from src.models.chunk import Chunk
 from src.models.entity import Entity
 from src.models.relation import Relation
+from src import embeddings as emb
 
 
 def main():
@@ -20,9 +23,10 @@ def main():
     load_dotenv()
     
     if len(sys.argv) < 2:
-        print("Usage: python export_to_neo4j.py <graph_json_file> [--clear]")
+        print("Usage: python export_to_neo4j.py <graph_json_file> [--clear] [--no-embed]")
         print("\nOptions:")
         print("  --clear    Clear existing graph data before importing")
+        print("  --no-embed Skip vector embeddings (by default embeddings are stored for semantic search, Neo4j 5.13+)")
         print("\nExample:")
         print('  python export_to_neo4j.py "outputs/Legal _ Uber_graph.json"')
         print('  python export_to_neo4j.py "outputs/Legal _ Uber_graph.json" --clear')
@@ -30,6 +34,7 @@ def main():
     
     json_path = sys.argv[1]
     clear_existing = "--clear" in sys.argv
+    use_embeddings = "--no-embed" not in sys.argv
     
     if not Path(json_path).exists():
         print(f"Error: File not found: {json_path}")
@@ -54,15 +59,23 @@ def main():
     # Reconstruct DocumentGraph
     entities = [Entity(**e) for e in data['entities']]
     relations = [Relation(**r) for r in data['relations']]
+    document = None
+    if data.get('document'):
+        document = Document(**data['document'])
+    chunks = [Chunk(**c) for c in data.get('chunks', [])]
     
     graph = DocumentGraph(
         entities=entities,
         relations=relations,
         document_id=data.get('document_id'),
-        metadata=data.get('metadata', {})
+        document=document,
+        chunks=chunks,
+        metadata=data.get('metadata', {}),
     )
     
     print(f"Loaded {len(graph.entities)} entities and {len(graph.relations)} relations")
+    if graph.document:
+        print(f"  Document: {graph.document.doc_id} ({len(graph.chunks)} chunks)")
     
     # Export to Neo4j
     try:
@@ -76,11 +89,17 @@ def main():
             if clear_existing:
                 print("⚠ Clearing existing graph data...")
             
-            print("Exporting graph to Neo4j...")
+            if use_embeddings:
+                print("Computing embeddings and exporting graph to Neo4j...")
+            else:
+                print("Exporting graph to Neo4j...")
             stats = exporter.export_graph(
                 graph,
                 clear_existing=clear_existing,
-                merge_duplicates=True
+                merge_duplicates=True,
+                embedder=emb.embed_entity if use_embeddings else None,
+                embedding_dimension=emb.get_embedding_dimension() if use_embeddings else None,
+                chunk_embedder=emb.embed_chunk if use_embeddings else None,
             )
             
             print(f"\n✓ Export complete!")

@@ -1,20 +1,98 @@
 """LangGraph workflow for document entity and relation extraction."""
 
-from typing import TypedDict, List
+from pathlib import Path
+from typing import TypedDict, List, Optional, Any
 from langgraph.graph import StateGraph, END
 from src.models.document_graph import DocumentGraph
+from src.models.document import Document
+from src.models.chunk import Chunk
 from src.models.entity import Entity
 from src.models.relation import Relation
 from src.document_processor import DocumentProcessor
+from src.chunking import chunk_text
 from .entity_extractor import EntityExtractor
 from .relation_extractor import RelationExtractor
 import os
+import re
+
+# Canonical entity types for consistent labels across chunks
+CANONICAL_ENTITY_TYPES = {
+    "PERSON", "ORGANIZATION", "LOCATION", "DATE", "TIME", "MONEY",
+    "PRODUCT", "EVENT", "TECHNOLOGY", "CONCEPT", "DOCUMENT", "LAW", "UNKNOWN",
+}
 
 
-class ExtractionState(TypedDict):
+def _normalize_entity_name(name: str) -> str:
+    """Normalize entity name for deduplication (lowercase, collapse spaces)."""
+    if not name or not isinstance(name, str):
+        return ""
+    return re.sub(r"\s+", " ", name.strip().lower())
+
+
+def _normalize_entity_type(t: str) -> str:
+    """Map LLM type to canonical type (uppercase, common variants)."""
+    if not t or not isinstance(t, str):
+        return "UNKNOWN"
+    u = t.strip().upper()
+    if u in CANONICAL_ENTITY_TYPES:
+        return u
+    # Common variants
+    for canonical, aliases in [
+        ("ORGANIZATION", ["ORG", "ORGANISATION"]),
+        ("PERSON", ["PERSON", "PEOPLE"]),
+        ("LOCATION", ["LOC"]),
+    ]:
+        if u in aliases:
+            return canonical
+    return u if u else "UNKNOWN"
+
+
+def _merge_entities(entities_per_chunk: List[List[Entity]]) -> List[Entity]:
+    """
+    Merge entities from multiple chunk extractions: deduplicate by (normalized name, normalized type),
+    merge source_chunk_ids, and merge extra attributes (when same entity appears in two calls).
+    """
+    # key (norm_name, norm_type) -> merged entity (first id, merged chunk ids, merged attrs)
+    merged: dict[tuple[str, str], Entity] = {}
+    entity_id_counter = 1
+
+    for chunk_entities in entities_per_chunk:
+        for e in chunk_entities:
+            norm_name = _normalize_entity_name(e.name)
+            norm_type = _normalize_entity_type(e.type)
+            key = (norm_name, norm_type)
+            props = e.get_all_properties()
+            core = {"id", "name", "type", "description", "source_chunk_ids", "metadata"}
+            extra_attrs = {k: v for k, v in props.items() if k not in core and v is not None}
+
+            if key not in merged:
+                # First occurrence: assign global id and keep this entity's attributes
+                new_id = f"entity_{entity_id_counter}"
+                entity_id_counter += 1
+                merged_chunk_ids = list(getattr(e, "source_chunk_ids", None) or [])
+                first_entity = e.model_copy(deep=True)
+                first_entity.id = new_id
+                first_entity.source_chunk_ids = merged_chunk_ids
+                merged[key] = first_entity
+            else:
+                # Merge: add chunk ids and add extra attributes not already present
+                existing = merged[key]
+                existing_chunks = set(existing.source_chunk_ids or [])
+                for cid in getattr(e, "source_chunk_ids", None) or []:
+                    existing_chunks.add(cid)
+                existing.source_chunk_ids = sorted(existing_chunks)
+                for k, v in extra_attrs.items():
+                    if not hasattr(existing, k) or getattr(existing, k) is None:
+                        setattr(existing, k, v)
+    return list(merged.values())
+
+
+class ExtractionState(TypedDict, total=False):
     """State for the extraction workflow."""
     document_path: str
     text: str
+    document: Optional[Document]
+    chunks: List[Chunk]
     entities: List[Entity]
     relations: List[Relation]
     graph: DocumentGraph
@@ -63,15 +141,30 @@ class DocumentExtractionGraph:
         return workflow.compile()
     
     def _load_document(self, state: ExtractionState) -> ExtractionState:
-        """Load and process the document."""
+        """Load and process the document; build Document node and chunks."""
         try:
-            print(f"Loading document: {state['document_path']}")
-            text = self.processor.extract_text(state["document_path"])
+            doc_path = state["document_path"]
+            print(f"Loading document: {doc_path}")
+            text = self.processor.extract_text(doc_path)
             state["text"] = text
             state["error"] = ""
+            state["document"] = None
+            state["chunks"] = []
             print(f"Document loaded. Text length: {len(text)} characters")
             if not text or not text.strip():
                 state["error"] = "Document text extraction returned empty result"
+                return state
+            path = Path(doc_path)
+            doc_id = path.stem or doc_path
+            title = path.name
+            state["document"] = Document(
+                doc_id=doc_id,
+                title=title,
+                source=doc_path,
+                published_date=None,
+            )
+            state["chunks"] = chunk_text(text, document_id=doc_id, chunk_size=1000, overlap=200)
+            print(f"Chunked into {len(state['chunks'])} chunks")
         except Exception as e:
             state["error"] = f"Error loading document: {str(e)}"
             import traceback
@@ -79,21 +172,25 @@ class DocumentExtractionGraph:
         return state
     
     def _extract_entities(self, state: ExtractionState) -> ExtractionState:
-        """Extract entities from the document text."""
+        """Extract entities per chunk (one LLM call per chunk), then merge duplicates and combine attributes."""
         if state.get("error"):
             return state
         
-        # Check if text is empty
-        if not state.get("text") or not state["text"].strip():
-            state["error"] = "Document text is empty. Cannot extract entities."
+        chunks: List[Chunk] = state.get("chunks") or []
+        if not chunks:
+            state["error"] = "No chunks available. Cannot extract entities."
             state["entities"] = []
             return state
         
         try:
-            print(f"Extracting entities from text (length: {len(state['text'])} characters)...")
-            entities = self.entity_extractor.extract_entities(state["text"])
-            state["entities"] = entities
-            print(f"Extracted {len(entities)} entities")
+            entities_per_chunk: List[List[Entity]] = []
+            for i, ch in enumerate(chunks):
+                print(f"Extracting entities from chunk {i+1}/{len(chunks)} ({ch.id}, {len(ch.text)} chars)...")
+                chunk_entities = self.entity_extractor.extract_entities(ch.text, chunk_ids=[ch.id])
+                entities_per_chunk.append(chunk_entities)
+            merged = _merge_entities(entities_per_chunk)
+            state["entities"] = merged
+            print(f"Merged {sum(len(e) for e in entities_per_chunk)} raw entities into {len(merged)} unique entities")
         except Exception as e:
             state["error"] = f"Error extracting entities: {str(e)}"
             state["entities"] = []
@@ -120,7 +217,7 @@ class DocumentExtractionGraph:
         return state
     
     def _build_graph_structure(self, state: ExtractionState) -> ExtractionState:
-        """Build the final document graph structure."""
+        """Build the final document graph structure (document, chunks, entities, relations). source_chunk_ids set by LLM from chunk markers in text."""
         if state.get("error"):
             return state
         
@@ -128,11 +225,14 @@ class DocumentExtractionGraph:
             graph = DocumentGraph(
                 entities=state.get("entities", []),
                 relations=state.get("relations", []),
-                document_id=state.get("document_path", ""),
+                document_id=state["document"].doc_id if state.get("document") else state.get("document_path", ""),
+                document=state.get("document"),
+                chunks=state.get("chunks") or [],
                 metadata={
                     "text_length": len(state.get("text", "")),
                     "num_entities": len(state.get("entities", [])),
-                    "num_relations": len(state.get("relations", []))
+                    "num_relations": len(state.get("relations", [])),
+                    "num_chunks": len(state.get("chunks") or []),
                 }
             )
             state["graph"] = graph

@@ -2,7 +2,8 @@
 
 import os
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from src.models.entity import Entity
@@ -25,7 +26,7 @@ class EntityExtractor:
         self.parser = JsonOutputParser(pydantic_object=Entity)
     
     def _extract_json_from_markdown(self, text: str) -> str:
-        """Extract JSON from markdown code blocks if present."""
+        """Extract JSON from markdown code blocks if present.""" 
         # Remove markdown code block markers
         text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
@@ -58,16 +59,32 @@ class EntityExtractor:
         
         return text
         
-    def extract_entities(self, text: str) -> List[Entity]:
+    def extract_entities(self, text: str, chunk_ids: Optional[List[str]] = None) -> List[Entity]:
         """
         Extract entities from text. First extracts all entities, then categorizes them into types.
         
         Args:
-            text: Text content to extract entities from
+            text: Text content to extract entities from (may contain "--- CHUNK <id> ---" separators when chunk_ids is set)
+            chunk_ids: If provided, text is assumed to have chunk markers and the LLM must return source_chunk_ids for each entity
         
         Returns:
-            List of extracted entities with dynamically assigned types
+            List of extracted entities with dynamically assigned types (and source_chunk_ids when chunk_ids is provided)
         """
+        # Single-chunk mode: we will set source_chunk_ids in code; no need to ask LLM.
+        single_chunk_id: Optional[List[str]] = chunk_ids if (chunk_ids and len(chunk_ids) == 1) else None
+        chunk_instruction = ""
+        if chunk_ids and len(chunk_ids) > 1:
+            ids_str = ", ".join(f'"{cid}"' for cid in chunk_ids)
+            chunk_instruction = (
+                "\n\nThe text is divided into chunks. Each chunk is marked with a line: --- CHUNK <chunk_id> ---. "
+                "For each entity you extract, you MUST include source_chunk_ids: a JSON array of the exact chunk ids "
+                "where that entity is mentioned (e.g. [\"chunk_0\", \"chunk_1\"]). Use only these chunk ids: " + ids_str + ". "
+                "If an entity appears in multiple chunks, list all of them. If unsure, list the chunk(s) where the entity name or description appears."
+            )
+        type_instruction = (
+            " Use these entity types when possible for consistency: PERSON, ORGANIZATION, LOCATION, DATE, TIME, MONEY, "
+            "PRODUCT, EVENT, TECHNOLOGY, CONCEPT, DOCUMENT, LAW. Prefer these exact labels."
+        )
         # Step 1: Extract all entities from the document without predefined types
         extract_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are an expert entity extraction system. Extract all meaningful entities from the given text.
@@ -85,7 +102,7 @@ Additionally, extract ALL available properties for each entity based on the text
 - For DOCUMENT: author, publication_date, version, pages, etc.
 - And any other relevant properties mentioned in the text
 Include these properties directly in the entity object (not just in metadata). Extract as many properties as are available in the text.
-Return a JSON array of entities. Each entity should be unique - do not duplicate entities with the same name."""),
+Return a JSON array of entities. Each entity should be unique - do not duplicate entities with the same name.""" + type_instruction + chunk_instruction),
             ("human", "Extract all entities from the following text. Include all available properties for each entity:\n\n{text}\n\nReturn only valid JSON array of entities with all their properties.")
         ])
         
@@ -123,16 +140,30 @@ Return a JSON array of entities. Each entity should be unique - do not duplicate
                 print("Warning: No entities extracted in first step")
                 return []
             
+            # Normalize source_chunk_ids: single-chunk mode we set it; multi-chunk use LLM output
+            if single_chunk_id:
+                for d in entities_data:
+                    d["source_chunk_ids"] = list(single_chunk_id)
+            elif chunk_ids:
+                valid_ids = set(chunk_ids)
+                for d in entities_data:
+                    raw = d.get("source_chunk_ids")
+                    if raw is None:
+                        d["source_chunk_ids"] = []
+                    elif isinstance(raw, list):
+                        d["source_chunk_ids"] = [str(x) for x in raw if str(x) in valid_ids]
+                    else:
+                        d["source_chunk_ids"] = [str(raw)] if str(raw) in valid_ids else []
+            
             print(f"Extracted {len(entities_data)} entities in first step, now categorizing...")
             
-            # Step 2: Categorize entities into types
+            # Step 2: Categorize entities into types (use canonical types for consistency)
             categorize_prompt = ChatPromptTemplate.from_messages([
                 ("system", """You are an expert entity categorization system. Categorize the extracted entities into appropriate types.
-Given a list of entities, assign each one a type that best describes it. Common types include:
-PERSON, ORGANIZATION, LOCATION, DATE, TIME, MONEY, PRODUCT, EVENT, TECHNOLOGY, CONCEPT, etc.
+Use ONLY these types for consistency: PERSON, ORGANIZATION, LOCATION, DATE, TIME, MONEY, PRODUCT, EVENT, TECHNOLOGY, CONCEPT, DOCUMENT, LAW. Use UNKNOWN only if nothing fits.
 For each entity, provide:
 - id: The original entity id
-- type: A category/type that best describes this entity
+- type: One of the types above
 - name: The original entity name
 - description: The original description
 - ALL original properties: Preserve all properties that were extracted (email, phone, location, dates, etc.)

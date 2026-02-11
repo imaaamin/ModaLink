@@ -24,15 +24,21 @@ def visualize_from_json(json_path: str, output_image: str = None):
     # Reconstruct DocumentGraph from JSON
     from src.models.entity import Entity
     from src.models.relation import Relation
+    from src.models.document import Document
+    from src.models.chunk import Chunk
     
     entities = [Entity(**e) for e in data['entities']]
     relations = [Relation(**r) for r in data['relations']]
+    document = Document(**data['document']) if data.get('document') else None
+    chunks = [Chunk(**c) for c in data.get('chunks', [])]
     
     graph = DocumentGraph(
         entities=entities,
         relations=relations,
         document_id=data.get('document_id'),
-        metadata=data.get('metadata', {})
+        document=document,
+        chunks=chunks,
+        metadata=data.get('metadata', {}),
     )
     
     visualizer = GraphVisualizer()

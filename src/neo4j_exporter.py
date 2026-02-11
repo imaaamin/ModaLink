@@ -2,10 +2,18 @@
 
 import os
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable, List
 from src.models.document_graph import DocumentGraph
+from src.models.document import Document
+from src.models.chunk import Chunk
 from src.models.entity import Entity
 from src.models.relation import Relation
+
+# Vector index names and property for embeddings (Neo4j 5.13+)
+ENTITY_EMBEDDING_INDEX_NAME = "entity_embedding"
+CHUNK_EMBEDDING_INDEX_NAME = "chunk_embedding"
+EMBEDDING_PROPERTY = "embedding"
+ENTITY_LABEL_FOR_INDEX = "Entity"
 
 
 class Neo4jExporter:
@@ -104,7 +112,10 @@ class Neo4jExporter:
         self,
         document_graph: DocumentGraph,
         clear_existing: bool = False,
-        merge_duplicates: bool = True
+        merge_duplicates: bool = True,
+        embedder: Optional[Callable[[Entity], List[float]]] = None,
+        embedding_dimension: Optional[int] = None,
+        chunk_embedder: Optional[Callable[[Chunk], List[float]]] = None,
     ) -> Dict[str, Any]:
         """
         Export a document graph to Neo4j.
@@ -113,10 +124,18 @@ class Neo4jExporter:
             document_graph: The document graph to export
             clear_existing: Whether to clear nodes/relationships created by this tool before importing
             merge_duplicates: Whether to merge nodes with the same name and type
-
+            embedder: Optional callable Entity -> list[float] to store vector embeddings on entity nodes.
+            embedding_dimension: Required when embedder or chunk_embedder is set; used for vector index creation.
+            chunk_embedder: Optional callable Chunk -> list[float] to store vector embeddings on chunk nodes.
+        
         Returns:
             Dictionary with export statistics
         """
+        if (embedder is not None or chunk_embedder is not None) and embedding_dimension is None:
+            raise ValueError("embedding_dimension is required when embedder or chunk_embedder is provided.")
+        use_embeddings = embedder is not None
+        use_chunk_embeddings = chunk_embedder is not None
+
         with self.driver.session(database=self.database) as session:
             stats = {
                 "entities_created": 0,
@@ -128,11 +147,75 @@ class Neo4jExporter:
             try:
                 # Clear only data created by this tool (scoped by _source tag)
                 if clear_existing:
+                    session.run("MATCH (n) DETACH DELETE n")
+                    for idx_name in (ENTITY_EMBEDDING_INDEX_NAME, CHUNK_EMBEDDING_INDEX_NAME):
+                        try:
+                            session.run(f"DROP INDEX {idx_name} IF EXISTS")
+                        except Exception:
+                            pass
+                    print("Cleared existing graph data.")
+                
+                # Create Document node and Chunk chain (Document)->first chunk, chunk->next chunk
+                if document_graph.document and document_graph.chunks:
+                    doc = document_graph.document
+                    doc_props = doc.for_neo4j()
                     session.run(
-                        "MATCH (n {_source: $source}) DETACH DELETE n",
-                        {"source": self._SOURCE_TAG}
+                        """
+                        MERGE (d:Document {docId: $docId})
+                        SET d.title = $title, d.source = $source, d.publishedDate = $publishedDate
+                        """,
+                        **doc_props,
                     )
-                    print("Cleared existing graph data created by DocumentExtractor.")
+                    for ch in document_graph.chunks:
+                        session.run(
+                            """
+                            MERGE (c:Chunk {id: $id})
+                            SET c.name = $name, c.text = $text, c.index = $index, c.document_id = $document_id
+                            """,
+                            id=ch.id,
+                            name=ch.id,
+                            text=ch.text,
+                            index=ch.index,
+                            document_id=ch.document_id,
+                        )
+                    if use_chunk_embeddings and document_graph.chunks:
+                        for ch in document_graph.chunks:
+                            emb = chunk_embedder(ch)
+                            if len(emb) != embedding_dimension:
+                                raise ValueError(
+                                    f"Chunk embedder returned dimension {len(emb)}, expected {embedding_dimension}"
+                                )
+                            session.run(
+                                """
+                                MATCH (c:Chunk {id: $id})
+                                SET c.embedding = $embedding
+                                """,
+                                id=ch.id,
+                                embedding=[float(x) for x in emb],
+                            )
+                    # (Document)-[:FIRST_CHUNK]->(first Chunk)
+                    if document_graph.chunks:
+                        first_id = document_graph.chunks[0].id
+                        session.run(
+                            """
+                            MATCH (d:Document {docId: $docId})
+                            MATCH (c:Chunk {id: $chunk_id})
+                            MERGE (d)-[:FIRST_CHUNK]->(c)
+                            """,
+                            docId=doc_props["docId"],
+                            chunk_id=first_id,
+                        )
+                    # (Chunk)-[:NEXT_CHUNK]->(next Chunk)
+                    for i in range(len(document_graph.chunks) - 1):
+                        session.run(
+                            """
+                            MATCH (a:Chunk {id: $from_id})
+                            MATCH (b:Chunk {id: $to_id})
+                            MERGE (a)-[:NEXT_CHUNK]->(b)
+                            """,
+                            from_id=document_graph.chunks[i].id,
+                            to_id=document_graph.chunks[i + 1].id,
+                        )
                 
                 # Create or merge entities
                 for entity in document_graph.entities:
@@ -165,8 +248,19 @@ class Neo4jExporter:
                                     # Convert other types to string
                                     additional_props[k] = str(v)
                         
+                        if use_embeddings:
+                            emb = embedder(entity)
+                            if len(emb) != embedding_dimension:
+                                raise ValueError(
+                                    f"Embedder returned dimension {len(emb)}, expected {embedding_dimension}"
+                                )
+                            # Ensure list of Python floats for Neo4j driver serialization
+                            additional_props[EMBEDDING_PROPERTY] = [float(x) for x in emb]
+                        
                         # Sanitize label name to be a valid Neo4j identifier
                         label = self._sanitize_label(entity.type)
+                        # When using embeddings, add Entity label so one vector index covers all nodes
+                        labels_clause = f"`{label}`:`{ENTITY_LABEL_FOR_INDEX}`" if use_embeddings else f"`{label}`"
                         
                         if merge_duplicates:
                             # Use MERGE to avoid duplicates based on id
@@ -186,17 +280,22 @@ class Neo4jExporter:
                                 "e.updated = timestamp()"
                             ]
                             
-                            # Add additional properties to SET clauses
-                            sanitized_additional = {}
+                            # Add additional properties to SET clauses (skip embedding; set explicitly below)
                             if additional_props:
                                 for prop_key, prop_value in additional_props.items():
+                                    if prop_key == EMBEDDING_PROPERTY:
+                                        continue
                                     sanitized_key = Neo4jExporter._sanitize_property_name(prop_key)
-                                    set_clauses.append(f"e.`{sanitized_key}` = $`{sanitized_key}`")
-                                    match_clauses.append(f"e.`{sanitized_key}` = $`{sanitized_key}`")
-                                    sanitized_additional[sanitized_key] = prop_value
-
+                                    set_clauses.append(f"e.`{sanitized_key}` = ${prop_key}")
+                                    match_clauses.append(f"e.`{sanitized_key}` = ${prop_key}")
+                            
+                            # Set embedding via a dedicated param so it is always written when use_embeddings
+                            if use_embeddings and EMBEDDING_PROPERTY in additional_props:
+                                set_clauses.append(f"e.`{EMBEDDING_PROPERTY}` = $embedding_vec")
+                                match_clauses.append(f"e.`{EMBEDDING_PROPERTY}` = $embedding_vec")
+                            
                             query = f"""
-                            MERGE (e:`{label}` {{id: $id}})
+                            MERGE (e:{labels_clause} {{id: $id}})
                             ON CREATE SET {', '.join(set_clauses)}
                             ON MATCH SET {', '.join(match_clauses)}
                             RETURN e
@@ -209,7 +308,9 @@ class Neo4jExporter:
                                 "description": entity.description or "",
                                 "source": self._SOURCE_TAG
                             }
-                            params.update(sanitized_additional)
+                            params.update(additional_props)
+                            if use_embeddings and EMBEDDING_PROPERTY in additional_props:
+                                params["embedding_vec"] = additional_props[EMBEDDING_PROPERTY]
                             
                             result = session.run(query, params)
                             record = result.single()
@@ -217,7 +318,6 @@ class Neo4jExporter:
                                 stats["entities_created"] += 1
                         else:
                             # Use CREATE to always create new nodes
-                            # Build property dictionary with sanitized keys
                             props_dict = {
                                 "id": entity.id,
                                 "name": entity.name,
@@ -225,16 +325,21 @@ class Neo4jExporter:
                                 "description": entity.description or "",
                                 "_source": self._SOURCE_TAG
                             }
-                            for prop_key, prop_value in additional_props.items():
-                                sanitized_key = Neo4jExporter._sanitize_property_name(prop_key)
-                                props_dict[sanitized_key] = prop_value
-
-                            # Build CREATE query with all properties
-                            props_str = ", ".join([f"`{k}`: ${k}" for k in props_dict.keys()])
+                            props_dict.update(additional_props)
+                            # Embedding via dedicated param so it is always written
+                            if use_embeddings and EMBEDDING_PROPERTY in props_dict:
+                                props_dict["embedding_vec"] = props_dict.pop(EMBEDDING_PROPERTY)
+                            props_str = ", ".join(
+                                [f"`{Neo4jExporter._sanitize_property_name(k)}`: ${k}" for k in props_dict.keys()]
+                            )
+                            if use_embeddings and "embedding_vec" in props_dict:
+                                props_str = props_str.replace(
+                                    "`embedding_vec`: $embedding_vec",
+                                    f"`{EMBEDDING_PROPERTY}`: $embedding_vec",
+                                )
                             query = f"""
-                            CREATE (e:`{label}` {{{props_str}}})
+                            CREATE (e:{labels_clause} {{{props_str}}})
                             """
-
                             session.run(query, props_dict)
                             stats["entities_created"] += 1
                     
@@ -330,12 +435,82 @@ class Neo4jExporter:
                         )
                         continue
                 
+                # (Entity)-[:MENTIONED_IN]->(Chunk) for each chunk in entity.source_chunk_ids
+                for entity in document_graph.entities:
+                    chunk_ids = getattr(entity, "source_chunk_ids", None) or []
+                    if not chunk_ids:
+                        continue
+                    for chunk_id in chunk_ids:
+                        try:
+                            session.run(
+                                """
+                                MATCH (e) WHERE e.id = $entity_id AND NOT 'Chunk' IN labels(e)
+                                MATCH (c:Chunk {id: $chunk_id})
+                                MERGE (e)-[:MENTIONED_IN]->(c)
+                                """,
+                                entity_id=entity.id,
+                                chunk_id=chunk_id,
+                            )
+                        except Exception as e:
+                            stats["errors"].append(f"Error linking entity {entity.id} to chunk {chunk_id}: {str(e)}")
+                
+                if use_embeddings and embedding_dimension is not None:
+                    self._create_entity_vector_index(session, embedding_dimension, stats)
+                if use_chunk_embeddings and embedding_dimension is not None:
+                    self._create_chunk_vector_index(session, embedding_dimension, stats)
+                
                 return stats
             
             except Exception as e:
                 stats["errors"].append(f"Export error: {str(e)}")
                 raise
     
+    def _create_entity_vector_index(
+        self, session, embedding_dimension: int, stats: Dict[str, Any]
+    ) -> None:
+        """Create the vector index for Entity.embedding (Neo4j 5.13+). No-op on failure (e.g. older server)."""
+        try:
+            session.run(f"DROP INDEX {ENTITY_EMBEDDING_INDEX_NAME} IF EXISTS")
+        except Exception:
+            pass
+        try:
+            session.run(
+                f"""
+                CREATE VECTOR INDEX {ENTITY_EMBEDDING_INDEX_NAME}
+                FOR (n:{ENTITY_LABEL_FOR_INDEX}) ON (n.`{EMBEDDING_PROPERTY}`)
+                OPTIONS {{
+                    indexConfig: {{
+                        `vector.dimensions`: $dim,
+                        `vector.similarity_function`: 'cosine'
+                    }}
+                }}
+                """,
+                dim=embedding_dimension,
+            )
+        except Exception as e:
+            stats["errors"].append(f"Could not create vector index (Neo4j 5.13+ required): {e}")
+
+    def _create_chunk_vector_index(
+        self, session, embedding_dimension: int, stats: Dict[str, Any]
+    ) -> None:
+        """Create the vector index for Chunk.embedding (Neo4j 5.13+). No-op on failure."""
+        try:
+            session.run(
+                f"""
+                CREATE VECTOR INDEX {CHUNK_EMBEDDING_INDEX_NAME}
+                FOR (n:Chunk) ON (n.`{EMBEDDING_PROPERTY}`)
+                OPTIONS {{
+                    indexConfig: {{
+                        `vector.dimensions`: $dim,
+                        `vector.similarity_function`: 'cosine'
+                    }}
+                }}
+                """,
+                dim=embedding_dimension,
+            )
+        except Exception as e:
+            stats["errors"].append(f"Could not create chunk vector index (Neo4j 5.13+ required): {e}")
+
     def get_statistics(self) -> Dict[str, Any]:
         """
         Get statistics about the Neo4j database.
