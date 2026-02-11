@@ -120,11 +120,16 @@ DocumentExtractor/
 │   │   └── document_graph.py     # DocumentGraph model
 │   ├── model_provider.py         # LLM provider factory (Gemini primary, Groq fallback)
 │   ├── document_processor.py     # Document text extraction using docling
+│   ├── embeddings.py             # Entity/text embeddings (OpenAI or sentence-transformers)
+│   ├── graph_retriever.py        # Vector-based retrieval over Neo4j for LLM context
 │   └── neo4j_exporter.py         # Neo4j database export with Cypher queries
 ├── scripts/
 │   ├── __init__.py
 │   ├── graph_visualizer.py       # Graph visualization and export utilities (JSON, GraphML)
 │   ├── visualize_graph.py        # Graph visualization script with edge labels
+│   ├── export_to_neo4j.py        # Standalone Neo4j export script
+│   ├── query_graph.py            # Vector search: query string → top 10 nodes + Cypher
+│   └── fetch_pr_comments.py      # Utility to fetch GitHub PR comments
 │   └── export_to_neo4j.py        # Standalone Neo4j export script
 ├── main.py                        # CLI entry point (clears Neo4j by default; use --merge to keep existing)
 ├── pyproject.toml                 # Project dependencies (uv)
@@ -156,6 +161,7 @@ You can also export an existing JSON file to Neo4j:
 ```bash
 uv run python scripts/export_to_neo4j.py outputs/your_file_graph.json
 uv run python scripts/export_to_neo4j.py outputs/your_file_graph.json --clear  # Clear existing data first
+uv run python scripts/export_to_neo4j.py outputs/your_file_graph.json --clear  # Embeddings are included by default
 ```
 
 **Neo4j Graph Structure:**
@@ -168,6 +174,28 @@ uv run python scripts/export_to_neo4j.py outputs/your_file_graph.json --clear  #
 ```cypher
 MATCH (n) RETURN n LIMIT 500
 ```
+
+### Vector embeddings and semantic search (Neo4j 5.13+)
+
+**Vector embeddings are enabled by default** when exporting to Neo4j. Each node gets an `embedding` property and the `entity_embedding` vector index is created for similarity search.
+
+- **CLI:** `uv run python main.py document.pdf` or `uv run python scripts/export_to_neo4j.py graph.json --clear` (use `--no-embed` to skip embeddings)
+- **Programmatic:** pass `embedder=emb.embed_entity` and `embedding_dimension=emb.get_embedding_dimension()` to `exporter.export_graph(...)` (or omit both to skip).
+
+Embeddings use **OpenAI** when `OPENAI_API_KEY` is set (model `text-embedding-3-small`, 1536 dimensions), otherwise **sentence-transformers** (model `all-MiniLM-L6-v2`, 384 dimensions, no API key). Each node gets an `embedding` property and an extra label `Entity`; a vector index `entity_embedding` is created so you can run similarity search.
+
+**Graph retriever (context for LLM):** use `GraphRetriever` to turn a user query into relevant graph context:
+
+```python
+from src.graph_retriever import GraphRetriever
+
+with GraphRetriever() as retriever:
+    context = retriever.retrieve("What are the payment terms?", top_k=10, expand_hop=1)
+# Use context as part of your LLM prompt
+print(context)
+```
+
+This embeds the query, runs `db.index.vector.queryNodes('entity_embedding', k, query_vector)` in Neo4j, then loads 1-hop relationships for the top-k nodes and returns a single text (entities + relationships) suitable as context for an LLM.
 
 ## Viewing GraphML Files
 
@@ -190,7 +218,25 @@ uv run python scripts/visualize_graph.py outputs/your_file_graph.json graph.png
 
 **Export to Neo4j:**
 ```bash
-uv run python scripts/export_to_neo4j.py outputs/your_file_graph.json [--clear]
+uv run python scripts/export_to_neo4j.py outputs/your_file_graph.json [--clear] [--no-embed]
+```
+
+**Query graph (vector search, top 10 related nodes):**
+```bash
+uv run python scripts/query_graph.py "your natural language query"
+# Example: uv run python scripts/query_graph.py "payment terms"
+# Prints the Cypher used and formatted context for an LLM.
+```
+
+**Fetch GitHub PR Comments:**
+```bash
+uv run python scripts/fetch_pr_comments.py <owner> <repo> <pr_number> [output_file]
+```
+
+Example:
+```bash
+uv run python scripts/fetch_pr_comments.py microsoft vscode 12345
+uv run python scripts/fetch_pr_comments.py microsoft vscode 12345 comments.json
 ```
 
 ### Option 2: External Tools

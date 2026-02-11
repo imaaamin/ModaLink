@@ -122,8 +122,12 @@ class GraphVisualizer:
             "document_id": document_graph.document_id,
             "entities": [entity.model_dump() for entity in document_graph.entities],
             "relations": [relation.model_dump() for relation in document_graph.relations],
-            "metadata": document_graph.metadata
+            "metadata": document_graph.metadata or {},
         }
+        if document_graph.document is not None:
+            data["document"] = document_graph.document.model_dump()
+        if document_graph.chunks:
+            data["chunks"] = [ch.model_dump() for ch in document_graph.chunks]
         
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
