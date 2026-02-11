@@ -9,8 +9,9 @@ from src.models.chunk import Chunk
 from src.models.entity import Entity
 from src.models.relation import Relation
 
-# Vector index name and property used for entity embeddings (Neo4j 5.13+)
+# Vector index names and property for embeddings (Neo4j 5.13+)
 ENTITY_EMBEDDING_INDEX_NAME = "entity_embedding"
+CHUNK_EMBEDDING_INDEX_NAME = "chunk_embedding"
 EMBEDDING_PROPERTY = "embedding"
 ENTITY_LABEL_FOR_INDEX = "Entity"
 
@@ -114,6 +115,7 @@ class Neo4jExporter:
         merge_duplicates: bool = True,
         embedder: Optional[Callable[[Entity], List[float]]] = None,
         embedding_dimension: Optional[int] = None,
+        chunk_embedder: Optional[Callable[[Chunk], List[float]]] = None,
     ) -> Dict[str, Any]:
         """
         Export a document graph to Neo4j.
@@ -122,15 +124,17 @@ class Neo4jExporter:
             document_graph: The document graph to export
             clear_existing: Whether to clear nodes/relationships created by this tool before importing
             merge_duplicates: Whether to merge nodes with the same name and type
-            embedder: Optional callable Entity -> list[float] to store vector embeddings on nodes (for Neo4j 5.13+ vector index).
-            embedding_dimension: Required when embedder is set; used for vector index creation (e.g. 384 for all-MiniLM-L6-v2).
+            embedder: Optional callable Entity -> list[float] to store vector embeddings on entity nodes.
+            embedding_dimension: Required when embedder or chunk_embedder is set; used for vector index creation.
+            chunk_embedder: Optional callable Chunk -> list[float] to store vector embeddings on chunk nodes.
         
         Returns:
             Dictionary with export statistics
         """
-        if embedder is not None and embedding_dimension is None:
-            raise ValueError("embedding_dimension is required when embedder is provided.")
+        if (embedder is not None or chunk_embedder is not None) and embedding_dimension is None:
+            raise ValueError("embedding_dimension is required when embedder or chunk_embedder is provided.")
         use_embeddings = embedder is not None
+        use_chunk_embeddings = chunk_embedder is not None
 
         with self.driver.session(database=self.database) as session:
             stats = {
@@ -144,10 +148,9 @@ class Neo4jExporter:
                 # Clear only data created by this tool (scoped by _source tag)
                 if clear_existing:
                     session.run("MATCH (n) DETACH DELETE n")
-                    # Drop vector index so we don't leave a stale index when re-importing without embeddings
-                    if not use_embeddings:
+                    for idx_name in (ENTITY_EMBEDDING_INDEX_NAME, CHUNK_EMBEDDING_INDEX_NAME):
                         try:
-                            session.run(f"DROP INDEX {ENTITY_EMBEDDING_INDEX_NAME} IF EXISTS")
+                            session.run(f"DROP INDEX {idx_name} IF EXISTS")
                         except Exception:
                             pass
                     print("Cleared existing graph data.")
@@ -167,13 +170,29 @@ class Neo4jExporter:
                         session.run(
                             """
                             MERGE (c:Chunk {id: $id})
-                            SET c.text = $text, c.index = $index, c.document_id = $document_id
+                            SET c.name = $name, c.text = $text, c.index = $index, c.document_id = $document_id
                             """,
                             id=ch.id,
+                            name=ch.id,
                             text=ch.text,
                             index=ch.index,
                             document_id=ch.document_id,
                         )
+                    if use_chunk_embeddings and document_graph.chunks:
+                        for ch in document_graph.chunks:
+                            emb = chunk_embedder(ch)
+                            if len(emb) != embedding_dimension:
+                                raise ValueError(
+                                    f"Chunk embedder returned dimension {len(emb)}, expected {embedding_dimension}"
+                                )
+                            session.run(
+                                """
+                                MATCH (c:Chunk {id: $id})
+                                SET c.embedding = $embedding
+                                """,
+                                id=ch.id,
+                                embedding=[float(x) for x in emb],
+                            )
                     # (Document)-[:FIRST_CHUNK]->(first Chunk)
                     if document_graph.chunks:
                         first_id = document_graph.chunks[0].id
@@ -437,6 +456,8 @@ class Neo4jExporter:
                 
                 if use_embeddings and embedding_dimension is not None:
                     self._create_entity_vector_index(session, embedding_dimension, stats)
+                if use_chunk_embeddings and embedding_dimension is not None:
+                    self._create_chunk_vector_index(session, embedding_dimension, stats)
                 
                 return stats
             
@@ -468,6 +489,27 @@ class Neo4jExporter:
             )
         except Exception as e:
             stats["errors"].append(f"Could not create vector index (Neo4j 5.13+ required): {e}")
+
+    def _create_chunk_vector_index(
+        self, session, embedding_dimension: int, stats: Dict[str, Any]
+    ) -> None:
+        """Create the vector index for Chunk.embedding (Neo4j 5.13+). No-op on failure."""
+        try:
+            session.run(
+                f"""
+                CREATE VECTOR INDEX {CHUNK_EMBEDDING_INDEX_NAME}
+                FOR (n:Chunk) ON (n.`{EMBEDDING_PROPERTY}`)
+                OPTIONS {{
+                    indexConfig: {{
+                        `vector.dimensions`: $dim,
+                        `vector.similarity_function`: 'cosine'
+                    }}
+                }}
+                """,
+                dim=embedding_dimension,
+            )
+        except Exception as e:
+            stats["errors"].append(f"Could not create chunk vector index (Neo4j 5.13+ required): {e}")
 
     def get_statistics(self) -> Dict[str, Any]:
         """

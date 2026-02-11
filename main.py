@@ -132,6 +132,7 @@ def main():
                         merge_duplicates=True,
                         embedder=emb.embed_entity if use_embeddings else None,
                         embedding_dimension=emb.get_embedding_dimension() if use_embeddings else None,
+                        chunk_embedder=emb.embed_chunk if use_embeddings else None,
                     )
                     
                     print(f"✓ Neo4j export complete!")

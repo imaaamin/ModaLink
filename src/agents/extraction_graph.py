@@ -13,6 +13,78 @@ from src.chunking import chunk_text
 from .entity_extractor import EntityExtractor
 from .relation_extractor import RelationExtractor
 import os
+import re
+
+# Canonical entity types for consistent labels across chunks
+CANONICAL_ENTITY_TYPES = {
+    "PERSON", "ORGANIZATION", "LOCATION", "DATE", "TIME", "MONEY",
+    "PRODUCT", "EVENT", "TECHNOLOGY", "CONCEPT", "DOCUMENT", "LAW", "UNKNOWN",
+}
+
+
+def _normalize_entity_name(name: str) -> str:
+    """Normalize entity name for deduplication (lowercase, collapse spaces)."""
+    if not name or not isinstance(name, str):
+        return ""
+    return re.sub(r"\s+", " ", name.strip().lower())
+
+
+def _normalize_entity_type(t: str) -> str:
+    """Map LLM type to canonical type (uppercase, common variants)."""
+    if not t or not isinstance(t, str):
+        return "UNKNOWN"
+    u = t.strip().upper()
+    if u in CANONICAL_ENTITY_TYPES:
+        return u
+    # Common variants
+    for canonical, aliases in [
+        ("ORGANIZATION", ["ORG", "ORGANISATION"]),
+        ("PERSON", ["PERSON", "PEOPLE"]),
+        ("LOCATION", ["LOC"]),
+    ]:
+        if u in aliases:
+            return canonical
+    return u if u else "UNKNOWN"
+
+
+def _merge_entities(entities_per_chunk: List[List[Entity]]) -> List[Entity]:
+    """
+    Merge entities from multiple chunk extractions: deduplicate by (normalized name, normalized type),
+    merge source_chunk_ids, and merge extra attributes (when same entity appears in two calls).
+    """
+    # key (norm_name, norm_type) -> merged entity (first id, merged chunk ids, merged attrs)
+    merged: dict[tuple[str, str], Entity] = {}
+    entity_id_counter = 1
+
+    for chunk_entities in entities_per_chunk:
+        for e in chunk_entities:
+            norm_name = _normalize_entity_name(e.name)
+            norm_type = _normalize_entity_type(e.type)
+            key = (norm_name, norm_type)
+            props = e.get_all_properties()
+            core = {"id", "name", "type", "description", "source_chunk_ids", "metadata"}
+            extra_attrs = {k: v for k, v in props.items() if k not in core and v is not None}
+
+            if key not in merged:
+                # First occurrence: assign global id and keep this entity's attributes
+                new_id = f"entity_{entity_id_counter}"
+                entity_id_counter += 1
+                merged_chunk_ids = list(getattr(e, "source_chunk_ids", None) or [])
+                first_entity = e.model_copy(deep=True)
+                first_entity.id = new_id
+                first_entity.source_chunk_ids = merged_chunk_ids
+                merged[key] = first_entity
+            else:
+                # Merge: add chunk ids and add extra attributes not already present
+                existing = merged[key]
+                existing_chunks = set(existing.source_chunk_ids or [])
+                for cid in getattr(e, "source_chunk_ids", None) or []:
+                    existing_chunks.add(cid)
+                existing.source_chunk_ids = sorted(existing_chunks)
+                for k, v in extra_attrs.items():
+                    if not hasattr(existing, k) or getattr(existing, k) is None:
+                        setattr(existing, k, v)
+    return list(merged.values())
 
 
 class ExtractionState(TypedDict, total=False):
@@ -100,7 +172,7 @@ class DocumentExtractionGraph:
         return state
     
     def _extract_entities(self, state: ExtractionState) -> ExtractionState:
-        """Extract entities in one LLM call: send full text with chunk separators so the LLM can fill source_chunk_ids for each entity."""
+        """Extract entities per chunk (one LLM call per chunk), then merge duplicates and combine attributes."""
         if state.get("error"):
             return state
         
@@ -111,14 +183,14 @@ class DocumentExtractionGraph:
             return state
         
         try:
-            # Build single text with clear chunk separators so the LLM can assign source_chunk_ids
-            separator = "\n\n--- CHUNK {id} ---\n\n"
-            combined_text = "".join(separator.format(id=ch.id) + ch.text for ch in chunks)
-            chunk_ids = [ch.id for ch in chunks]
-            print(f"Extracting entities from document (1 call, {len(chunks)} chunks, {len(combined_text)} chars)...")
-            entities = self.entity_extractor.extract_entities(combined_text, chunk_ids=chunk_ids)
-            state["entities"] = entities
-            print(f"Extracted {len(entities)} entities")
+            entities_per_chunk: List[List[Entity]] = []
+            for i, ch in enumerate(chunks):
+                print(f"Extracting entities from chunk {i+1}/{len(chunks)} ({ch.id}, {len(ch.text)} chars)...")
+                chunk_entities = self.entity_extractor.extract_entities(ch.text, chunk_ids=[ch.id])
+                entities_per_chunk.append(chunk_entities)
+            merged = _merge_entities(entities_per_chunk)
+            state["entities"] = merged
+            print(f"Merged {sum(len(e) for e in entities_per_chunk)} raw entities into {len(merged)} unique entities")
         except Exception as e:
             state["error"] = f"Error extracting entities: {str(e)}"
             state["entities"] = []

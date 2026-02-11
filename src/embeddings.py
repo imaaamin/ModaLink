@@ -3,6 +3,7 @@
 import os
 from typing import List, Optional
 from src.models.entity import Entity
+from src.models.chunk import Chunk
 
 # OpenAI (when OPENAI_API_KEY is set)
 OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
@@ -91,6 +92,11 @@ def embed_text(text: str) -> List[float]:
 def embed_entity(entity: Entity) -> List[float]:
     """Embed an entity (its text representation)."""
     return embed_text(entity_to_text(entity))
+
+
+def embed_chunk(chunk: Chunk) -> List[float]:
+    """Embed a chunk (its text content) for vector search."""
+    return embed_text(chunk.text)
 
 
 def get_embedding_dimension() -> int:
